@@ -8,10 +8,10 @@ At 96 kHz output the usable window is **6.146–6.190 MHz** (about 44 kHz wide).
 
 ## Requirements
 
-- macOS with a built-in headphone jack
+- macOS with a built-in headphone jack, or Windows (see [Windows](#windows-and-linux))
 - Python 3 (standard library only)
-- ffmpeg (`brew install ffmpeg`)
-- Xcode command line tools (`xcode-select --install`), to build the small audio helper on first run
+- ffmpeg (`brew install ffmpeg` on macOS; `ffmpeg.exe` on PATH on Windows)
+- macOS: Xcode command line tools (`xcode-select --install`), to build the small audio helper on first run
 - A receiver: any SDR that covers 6 MHz (RTL-SDR V4, HackRF, Airspy HF+ ...) with an antenna near the cable
 
 ## Usage
@@ -53,6 +53,18 @@ Options:
 - `--audio FILE`: the file for the audio modes (anything ffmpeg reads).
 - `--level DB`: peak level in dBFS (default -1).
 - `--render-only`: write the WAV to `cache/` without playing it.
+- `--clock MHZ`: the clock frequency to print in the tune lines (default 6.144).
+- `--device NAME`: play to a named device (Windows/Linux; needs `sounddevice` on Windows, or an ALSA device name for `aplay`). `--device list` shows the devices.
+- `-find`: a sweep to locate the clock line (see below).
+
+## Windows and Linux
+
+Requirements: Python 3 and ffmpeg on PATH. Playback uses `winsound` from the standard library on the default output device, or `aplay` on Linux.
+
+- Python cannot set the sample rate here. Set the output device to **96000 Hz** (Settings, Sound, the device, Advanced, Default Format) and make the headphone jack the default output while transmitting. jacktx prints this reminder.
+- Optional: `pip install sounddevice`, then `--device NAME` plays to that device and the speakers can stay the default.
+- Whether a PC leaks its clock, and at which frequency, depends on the audio chip. 6.144 MHz is the Apple silicon value. Run `python3 -I jacktx.py -find`: it plays a slow 2-40 kHz sweep with a beep at the start of each sweep, and prints candidate clocks. Scan 1-30 MHz with an SDR for a line that moves in step, then pass its centre with `--clock MHZ`, for example `--clock 12.288`.
+- Every printed tune line then uses that clock. The frequencies in the mode table above are for 6.144 MHz.
 
 ## Notes
 

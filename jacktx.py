@@ -4,6 +4,7 @@
 # jacktx.py - transmit test signals out of a MacBook headphone jack. The DAC clock leaks at 6.144 MHz
 # (96 kHz output rate); audio at f appears as RF at 6.144 MHz + f (usable f 2..46 kHz). Python stdlib + ffmpeg/afconvert/afplay.
 #   python3 -I jacktx.py -<mode> [--level -1] [--render-only]      python3 -I jacktx.py --selftest
+# Windows/Linux: playback via winsound / aplay / sounddevice, --clock MHZ for the chip's clock, -find to locate it (see README).
 import array, math, os
 # ---- common helpers (merged into jacktx.py) ----
 import array, math
@@ -124,7 +125,7 @@ _WSPR_SYNC = "110000001000111000100101111000000010010100000010110011010001101000
 # ---------------------------------------------------------------- shared small helpers of the digital modes
 
 def _aprs_mhz(audio_hz):
-    return "%.6f MHz" % ((6.144e6 + audio_hz) / 1e6)
+    return "%.6f MHz" % ((CLOCK_HZ + audio_hz) / 1e6)
 
 
 def _aprs_cache(cache_dir, name, build):
@@ -914,12 +915,12 @@ def mode_sonde(rate=RATE, cache_dir=None, seconds=60):
         lon = _RS41_LON + ve * k / (111320.0 * math.cos(math.radians(_RS41_LAT)))
         fr = _rs41_frame(1000 + k, t0 + k, _RS41_LAT, lon, alt, ve, 0.0, vup, cal, k)
         _rs41_burst(_rs41_symbols(fr), rate, _RS41_AUDIO_HZ, out, int((k + 0.05) * rate))
-    rf = 6.144e6 + _RS41_AUDIO_HZ
+    rf = CLOCK_HZ + _RS41_AUDIO_HZ
     return {"samples": out, "cycle": None, "phase": 0, "tune": [
         "RS41 radiosonde, serial %s, 4800 baud GFSK +-2.4 kHz (standard; OnAir sonde_gen.cpp:31, slicer is sign-based after a fixed +-10 kHz filter, sonde_rx.cpp:44), ~12 kHz wide, one frame a second" % _RS41_SERIAL,
         "RF %.4f MHz (audio %.0f Hz). OnAir mode: Radiosonde (sonde). It scans its whole capture for carriers," % (rf / 1e6, _RS41_AUDIO_HZ),
-        "  so tune the centre a bit off it (e.g. 6.100 MHz, 2 Msps or more). The mirror at %.4f MHz is the same sonde, inverted"
-        % ((6.144e6 - _RS41_AUDIO_HZ) / 1e6),
+        "  so tune the centre a bit off it (e.g. %.3f MHz, 2 Msps or more). The mirror at %.4f MHz is the same sonde, inverted"
+        % ((CLOCK_HZ - 44000) / 1e6, (CLOCK_HZ - _RS41_AUDIO_HZ) / 1e6),
         "  (OnAir decodes inverted RS41 too). Map pin: Greenwich 51.48 N 0.00 W, climbing 5 m/s from 50 m, drifting east 3 m/s.",
         "  Loop %d s: temperature/humidity appear once calibration subframes 3..7 have arrived (~8 s)." % seconds]}
 
@@ -1097,7 +1098,7 @@ def mode_noaa(rate=RATE, cache_dir=None, lines=_APT_LINES):
         if path:
             os.makedirs(cache_dir, exist_ok=True)
             with open(path, "wb") as fh: fh.write(out.tobytes())
-    rf = 6.144e6 + _APT_AUDIO_HZ
+    rf = CLOCK_HZ + _APT_AUDIO_HZ
     return {"samples": out, "cycle": None, "phase": 0, "tune": [
         "NOAA APT weather image: FM +-8 kHz (weak-signal choice; satellites use +-17), 2400 Hz AM subcarrier, 4160 words/s, 2 lines/s, %d-line loop (%d s)" % (lines, lines // 2),
         "RF %.4f MHz (audio %.0f Hz), occupies ~%.4f..%.4f MHz (Carson ~25 kHz)" % (rf / 1e6, _APT_AUDIO_HZ, (rf - 12500) / 1e6, (rf + 12500) / 1e6),
@@ -1423,7 +1424,7 @@ def _s2_make_ts(cache_dir, npk, seconds, muxrate):
     path = os.path.join(cache_dir, "%s.ts" % _S2_VER)
     if not os.path.exists(path):
         frames = _s2_video_frames(seconds - 1.5)       # a little shorter than the loop, so the TS fits and is null padded, never cut
-        cmd = ["/opt/homebrew/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x120",
+        cmd = [ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x120",
                "-r", "2", "-i", "pipe:0", "-c:v", "libx264", "-preset", "veryslow", "-profile:v", "high", "-pix_fmt", "yuv420p",
                "-b:v", "6k", "-maxrate", "6500", "-bufsize", "24k", "-g", "8", "-keyint_min", "8", "-sc_threshold", "0", "-x264-params", "nal-hrd=cbr",
                "-f", "mpegts", "-muxrate", str(int(muxrate)), "-pat_period", "2", "-sdt_period", "4", "-pcr_period", "400",
@@ -1462,14 +1463,14 @@ def mode_dvbs2(rate, cache_dir):
         with open(cpath + ".tmp", "wb") as f: out.tofile(f)
         os.replace(cpath + ".tmp", cpath)
         info = "ffmpeg gave %d TS packets, loop holds %d" % (got, npk)
-    rf = 6.144e6 + _S2_FC; bw = _S2_RS * (1 + _S2_ROLL)
+    rf = CLOCK_HZ + _S2_FC; bw = _S2_RS * (1 + _S2_ROLL)
     tune = ["DVB-S2 at %.6f MHz: QPSK 1/4, short frames (16200), pilots on, roll-off %.2f, %.1f ksym/s, %.1f kHz wide (%.1f-%.1f kHz audio)"
             % (rf / 1e6, _S2_ROLL, _S2_RS / 1e3, bw / 1e3, (_S2_FC - bw / 2) / 1e3, (_S2_FC + bw / 2) / 1e3),
             "TS %.0f bit/s: H.264 160x120 2 fps 6 kbit/s test card 'ONAIR VIA HEADPHONE JACK', service 'ONAIR JACK'; loop %.1f s = %d PLFRAMEs = %d TS packets (%s)"
             % (netrate, secs, nframes, npk, info),
             "OnAir: DVB-S/S2 mode, symbol rate set by hand to 0.032 Msym/s (Auto will not find it: the spectrum search floor is 60 ksym/s).",
             "CAVEAT: the released OnAir UI clamps a manual symbol rate to >= 0.050 Msym/s (app/dvbs/dvbs_ui.cpp:696); 50 ksym/s needs 60 kHz and does",
-            "not fit the 2-46 kHz window, so as released OnAir cannot decode this one. The upper copy (6.168 MHz) is upright; the mirror below is inverted."]
+            "not fit the 2-46 kHz window, so as released OnAir cannot decode this one. The upper copy (%.3f MHz) is upright; the mirror below is inverted." % (rf / 1e6)]
     return {"samples": out, "tune": tune, "cycle": None, "phase": 0}
 
 
@@ -1563,7 +1564,9 @@ def selftest_dvbs2():
 import subprocess, sys, time, wave, signal, struct
 
 CLOCK_HZ = 6.144e6
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
+MAC = sys.platform == "darwin"
+WIN = sys.platform == "win32"
+_FFMPEG_MAC = "/opt/homebrew/bin/ffmpeg"
 SONG = ""   # set with --audio FILE
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "cache")
@@ -1846,7 +1849,7 @@ def _ff(af, rate, seconds=None, src=None):
     src = src or SONG
     if not src: sys.exit("this mode plays an audio file: add --audio FILE (any format ffmpeg reads)")
     if not os.path.exists(src): sys.exit("audio file not found: " + src)
-    cmd = [FFMPEG, "-v", "error", "-i", src]
+    cmd = [ffmpeg_path(), "-v", "error", "-i", src]
     if seconds: cmd += ["-t", str(seconds)]
     cmd += ["-ac", "1", "-af", "aresample=%d,%s" % (rate, af), "-ar", str(rate), "-f", "f32le", "-"]   # filter at the output rate
     raw = subprocess.run(cmd, check=True, stdout=subprocess.PIPE).stdout
@@ -1995,6 +1998,129 @@ def set_rate(exe, r):
     return int(out[1])
 
 
+def ffmpeg_path():
+    """ffmpeg for the audio and DVB-S2 modes: the Homebrew one on macOS if present, else the first on PATH (ffmpeg.exe on Windows)."""
+    import shutil
+    if MAC and os.path.exists(_FFMPEG_MAC): return _FFMPEG_MAC
+    p = shutil.which("ffmpeg")
+    if not p:
+        sys.exit("ffmpeg not found: install it and make sure it is on PATH (%s)."
+                 % ("Windows: download a build, e.g. from ffmpeg.org, and add its bin folder to PATH" if WIN else "macOS: brew install ffmpeg; Linux: your package manager"))
+    return p
+
+
+# ---------------- find mode: locate the clock leak with an SDR ----------------
+def find_candidates():
+    """(MHz, why) candidate leak frequencies: sample rate x 64/128/256/512 within 1-30 MHz, plus common codec master clocks."""
+    c = {}
+    for fs in (44100, 48000, 96000, 192000):
+        for k in (64, 128, 256, 512):
+            f = fs * k / 1e6
+            if 1.0 <= f <= 30.0: c.setdefault(round(f, 6), []).append("%g kHz x %d" % (fs / 1e3, k))
+    for f in (24.576, 22.5792, 12.288, 11.2896, 6.144): c.setdefault(f, []).append("codec master clock")
+    return sorted((f, ", ".join(w)) for f, w in c.items())
+
+
+def mode_find(rate, cache_dir, period=10.0, lo=2000.0, hi=40000.0):
+    """Slow triangle sweep lo -> hi -> lo over `period` s at a steady level, plus a 1 kHz beep at the start of each sweep."""
+    n = int(period * rate); half = n // 2; s = array.array("f"); ph = 0.0
+    for i in range(n):
+        x = i / half if i < half else (n - i) / half            # 0 -> 1 -> 0
+        ph += 2 * math.pi * (lo + (hi - lo) * x) / rate
+        s.append(0.7 * math.sin(ph))
+    for i in range(int(0.15 * rate)):                              # beep: marks the start of every sweep
+        s[i] += 0.3 * math.sin(2 * math.pi * 1000.0 * i / rate)
+    tune = ["Finder: sweep %d -> %d kHz and back every %g s at a steady level, beep at the start of each sweep." % (lo / 1e3, hi / 1e3, period),
+            "With an SDR scan 1-30 MHz for a line that moves in step with the sweep (it moves up to %.0f kHz away from the clock, one copy each side)." % (hi / 1e3),
+            "The line centre is the clock: pass it as --clock MHZ. Candidates to check first:"]
+    for f, why in find_candidates(): tune.append("  %9.4f MHz  (%s)" % (f, why))
+    return {"samples": s, "cycle": None, "phase": 0, "tune": tune}
+
+
+# ---------------- playback on Windows / Linux ----------------
+def _wav_info(path):
+    with wave.open(path, "rb") as w: return w.getframerate(), w.getnframes() / float(w.getframerate())
+
+
+class _WinPlayer:
+    """winsound on the default output device; async + sleep so Ctrl+C is handled at once. loop=True repeats the WAV without a gap."""
+    def __init__(self, wav, loop):
+        import winsound
+        self.ws = winsound; self.dur = _wav_info(wav)[1]; self.loop = loop; self.t_end = time.time() + self.dur; self.stopped = False
+        flags = winsound.SND_FILENAME | winsound.SND_ASYNC | (winsound.SND_LOOP if loop else 0)
+        winsound.PlaySound(wav, flags)
+    def poll(self): return None if not self.stopped and (self.loop or time.time() < self.t_end) else 0
+    def wait(self, t=None):
+        while self.poll() is None: time.sleep(0.1)
+    def terminate(self): self.stopped = True; self.ws.PlaySound(None, 0)
+    kill = terminate
+
+
+class _SDPlayer:
+    """sounddevice raw stream (no numpy) to a named device, in a thread; plays the WAV once."""
+    def __init__(self, wav, device):
+        import sounddevice as sd, threading
+        self.t = threading.Thread(target=self._run, args=(sd, wav, device), daemon=True); self.stop = False; self.t.start()
+    def _run(self, sd, wav, device):
+        with wave.open(wav, "rb") as w:
+            data = w.readframes(w.getnframes()); rate = w.getframerate()
+        with sd.RawOutputStream(samplerate=rate, channels=2, dtype="int16", device=device) as st:
+            step = 4 * 4096
+            for i in range(0, len(data), step):
+                if self.stop: return
+                st.write(data[i:i + step])
+    def poll(self): return None if self.t.is_alive() else 0
+    def wait(self, t=None): self.t.join(t)
+    def terminate(self): self.stop = True
+    kill = terminate
+
+
+def playback_plan(plat, wav, have_sd=False, device=None, aplay=None, exe=None):
+    """Dry description of how a WAV is played: (kind, command list or None). Used by main() and testable without any audio."""
+    if plat == "darwin": return "helper", [exe or "jackaudio", "play", wav]
+    if device and have_sd: return "sounddevice", None
+    if plat == "win32": return "winsound", None
+    if aplay: return "aplay", [aplay, "-q"] + (["-D", device] if device else []) + [wav]
+    return "none", None
+
+
+def start_player(plan, wav, loop, device=None):
+    kind, cmd = plan
+    if kind in ("helper", "aplay"): return subprocess.Popen(cmd)
+    if kind == "winsound": return _WinPlayer(wav, loop)
+    if kind == "sounddevice": return _SDPlayer(wav, device)
+    sys.exit("no way to play audio here: install aplay (alsa-utils) or pip install sounddevice")
+
+
+def _have_sounddevice():
+    try: import sounddevice; return True
+    except Exception: return False
+
+
+def other_os_setup(args, wav):
+    """Windows/Linux: print what the user has to set up (the rate cannot be set from Python); returns (plan, device)."""
+    import shutil
+    device = args[args.index("--device") + 1] if "--device" in args else None
+    have_sd = _have_sounddevice()
+    if device == "list":
+        if not have_sd: sys.exit("--device list needs: pip install sounddevice")
+        import sounddevice as sd; print(sd.query_devices()); sys.exit(0)
+    if device and not have_sd and WIN:
+        print("note: --device needs the sounddevice package (pip install sounddevice); playing on the default output instead.")
+        device = None
+    rate = _wav_info(wav)[0]
+    plan = playback_plan(sys.platform, wav, have_sd, device, shutil.which("aplay"))
+    if plan[0] == "none": sys.exit("no way to play audio here: install aplay (alsa-utils) or pip install sounddevice")
+    print("output: %s. The WAV is %d Hz and the sample rate cannot be set from here." % (
+        "device '%s' via sounddevice" % device if plan[0] == "sounddevice" else "the default output device (%s)" % plan[0], rate))
+    if WIN:
+        print("  Set the output device to %d Hz: Settings > Sound > the device > Advanced > Default Format (%d Hz)." % (rate, rate))
+        if plan[0] != "sounddevice": print("  Make the headphone jack the default output while transmitting (and keep its volume at 100 %).")
+    else:
+        print("  Make sure the card runs at %d Hz (e.g. aplay -D hw:... or your mixer/pipewire settings), and keep its volume at 100 %%." % rate)
+    return plan, device
+
+
 def write_wav(path, samples, level_db):
     pk = max(1e-9, max(abs(v) for v in samples)); g = 10 ** (level_db / 20) / pk * 32767
     pcm = array.array("h", [int(v * g) for v in samples])
@@ -2004,7 +2130,7 @@ def write_wav(path, samples, level_db):
     os.replace(path + ".tmp", path)
 
 
-MODES = ["am", "nfm", "wfm", "usb", "rtty", "sstv", "wefax", "specart", "aprs", "pocsag", "ft8", "wspr", "multi", "noaa", "sonde", "dvbs2"]
+MODES = ["am", "nfm", "wfm", "usb", "rtty", "sstv", "wefax", "specart", "aprs", "pocsag", "ft8", "wspr", "multi", "noaa", "sonde", "dvbs2", "find"]
 
 
 def main():
@@ -2017,6 +2143,11 @@ def main():
     if "--level" in args:
         level = float(args[args.index("--level") + 1])
     if level > 0: sys.exit("level above 0 dBFS refused")
+    global CLOCK_HZ
+    if "--clock" in args:
+        try: CLOCK_HZ = float(args[args.index("--clock") + 1]) * 1e6
+        except (IndexError, ValueError): sys.exit("--clock needs a number in MHz, e.g. --clock 12.288")
+        if not 0.1e6 <= CLOCK_HZ <= 100e6: sys.exit("--clock MHZ out of range")
     mode = next((a[1:] for a in args if a.startswith("-") and not a.startswith("--") and a[1:] in MODES), None)
     if not mode:
         help_rows = [
@@ -2036,32 +2167,41 @@ def main():
             ("-noaa", "NOAA APT weather-satellite image", "NOAA APT 6.168000 MHz"),
             ("-sonde", "RS41 weather balloon, map", "6.159000 MHz (centre off it)"),
             ("-dvbs2", "DVB-S2 video, 32 ksym/s", "6.168000 MHz (receiver must accept 32 ksym/s)"),
+            ("-find", "sweep 2-40 kHz, to find the clock line", "scan 1-30 MHz for a line moving with the sweep"),
         ]
         print("jacktx: transmit test signals out of the headphone jack (DAC clock 6.144 MHz). Ctrl+C stops.")
         print("Based on jacktx by Kristijonas Adomaitis - https://github.com/adswill/jacktx (GPL-3.0-or-later)\n")
-        print("usage: python3 -I jacktx.py -<mode> [--audio FILE] [--level -1] [--render-only]")
-        print("       python3 -I jacktx.py --selftest\n")
+        print("usage: python3 -I jacktx.py -<mode> [--audio FILE] [--level -1] [--render-only] [--clock MHZ] [--device NAME]")
+        print("       python3 -I jacktx.py --selftest")
+        print("The frequencies below assume the 6.144 MHz clock of Apple silicon MacBooks; on other chips use -find, then --clock MHZ.\n")
         for f, what, tune in help_rows: print("  %-10s %-40s %s" % (f, what, tune))
         sys.exit(2)
     t0 = time.time()
     m = globals()["mode_" + mode](RATE, CACHE)
     wav = os.path.join(CACHE, "jacktx-%s.wav" % mode)
-    write_wav(wav, m["samples"], level)
+    os.makedirs(CACHE, exist_ok=True); write_wav(wav, m["samples"], level)
     print("rendered -%s: %.1f s loop in %.1f s -> %s" % (mode, len(m["samples"]) / RATE, time.time() - t0, wav))
+    if not MAC and "--clock" not in args and mode != "find":
+        print("note: the clock frequency is chip-specific. 6.144 MHz is the Apple silicon value and is only a guess here; "
+              "run -find to locate the line, then use --clock MHZ.")
     print("TUNE (RF = %.3f MHz DAC clock + audio frequency; the mirror below the clock is inverted, ignore it):" % (CLOCK_HZ / 1e6))
     for line in m["tune"]: print("  " + line)
     if "--render-only" in args: return
-    exe = _helper()
-    name, present, old, vol = device_info(exe)
-    if not present:
-        sys.exit("the headphone jack is not available: plug the cable in (the system output can stay on the speakers).")
-    if vol < 0.99:
-        print("note: the headphone jack's own volume is %d %%; set it to 100 %% for the strongest signal "
-              "(select External Headphones once in Sound settings, turn it up, then switch back to the speakers)." % round(vol * 100))
-    now = set_rate(exe, RATE) if old != RATE else old
-    if now != RATE:
-        sys.exit("could not set %s to %d Hz (now %d)" % (name, RATE, now))
-    print("output: the headphone jack directly, at %d Hz (was %d); the system output stays as it is. Ctrl+C to stop." % (now, old))
+    if MAC:
+        exe = _helper(); device = None
+        name, present, old, vol = device_info(exe)
+        if not present:
+            sys.exit("the headphone jack is not available: plug the cable in (the system output can stay on the speakers).")
+        if vol < 0.99:
+            print("note: the headphone jack's own volume is %d %%; set it to 100 %% for the strongest signal "
+                  "(select External Headphones once in Sound settings, turn it up, then switch back to the speakers)." % round(vol * 100))
+        now = set_rate(exe, RATE) if old != RATE else old
+        if now != RATE:
+            sys.exit("could not set %s to %d Hz (now %d)" % (name, RATE, now))
+        print("output: the headphone jack directly, at %d Hz (was %d); the system output stays as it is. Ctrl+C to stop." % (now, old))
+    else:
+        plan, device = other_os_setup(args, wav); old = RATE; exe = None
+        print("Ctrl+C to stop.")
     proc = [None]
     def stop(*_): raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
@@ -2073,7 +2213,8 @@ def main():
                 if start - t > 2: print("waiting %.0f s for the next %d s slot" % (start - t, c))
                 while time.time() < start - 0.02: time.sleep(min(0.2, max(0.0, start - time.time() - 0.02)))
                 print(time.strftime("%H:%M:%S", time.gmtime()), "UTC  transmitting")
-            proc[0] = subprocess.Popen([exe, "play", wav])
+            if MAC: plan = playback_plan("darwin", wav, exe=exe)
+            proc[0] = start_player(plan, wav, loop=not m["cycle"] and plan[0] == "winsound", device=device)
             proc[0].wait()
     except KeyboardInterrupt:
         print("\nstopping")
