@@ -1,0 +1,5 @@
+cache/
+__pycache__/
+*.wav
+*.f32
+.DS_Store
