@@ -374,7 +374,7 @@ def jack_state():
     has_in = any(d[3] == "1" for d in devs)
     out = subprocess.run(["system_profiler", "SPAudioDataType"], capture_output=True, text=True).stdout
     has_out = "External Headphones" in out
-    reg = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True, text=True).stdout
+    reg = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True).stdout.decode("utf-8", "replace")   # ioreg prints raw bytes in some properties
     line = next((l for l in reg.splitlines() if '"DetectHistory"' in l), "")
     tries = []
     for m in re.finditer(r'"DetectTime"=(\d+),"HSSwitchDetect"=\(([^)]*)\).*?"DetectConfidence"="([^"]*)","MicDetect"=(Yes|No)', line):
