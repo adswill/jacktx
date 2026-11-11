@@ -8,3 +8,4 @@ __pycache__/
 *.cu8
 *.cf32
 *.sigmf-data
+lab/bin/
