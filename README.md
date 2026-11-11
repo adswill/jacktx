@@ -114,6 +114,25 @@ python3 -I jacktx.py -rx nfm --out nfm.wav            # demodulate -nfm to a WAV
 - `--wav FILE` alone sends the audio unchanged: *f* Hz appears at line ± *f*. With `--freq` it is moved like SSB, so its 0 Hz lands at that frequency. With `-am`, `-nfm`, `-wfm` or `-usb` the WAV is the programme audio.
 - Bad input fails with a clear message: unknown format, odd file size, missing sample rate, a 1-channel WAV given as IQ, unsupported WAV encodings.
 
+## Receive (HackRF)
+
+`jackrx.py` is the receive side. It needs a HackRF and the Xcode command line tools (two small Swift helpers are built on first use).
+
+```bash
+python3 -I jackrx.py fm 93.9          # one FM station: audio to a WAV, stereo pilot, RDS name and radio text
+python3 -I jackrx.py sweep            # the whole FM band: every station, RDS of the strongest, a spectrum page (HTML)
+python3 -I jackrx.py sweep --band 60-80   # any band: spectrum and the strongest signals
+python3 -I jackrx.py aux              # the headphone jack as an input, when the Mac offers one
+```
+
+The same commands work as `python3 -I jacktx.py -rx fm 93.9` and `-rx sweep`. Tested on real broadcasts with a HackRF Pro: the sweep lists about 40 signals and decodes the RDS of about 25 stations.
+
+`aux` only works when the plug has a microphone contact (a 4-pole plug or a headset splitter). A plain 3-pole aux cable gives no input: the command says so and explains what to try. With an input it records at each rate, shows the spectrum up to 48 kHz, names known VLF transmitters and checks for FM stations that fold into the audio band. That path is untested until such a plug is available.
+
+## Wide signals
+
+The jack's RF lines repeat every 512 kHz and are switched by the sign of the audio, so one audio tone spreads to about 1 MHz around each line. The measurements, a keying test (`lab/zck.py`) and the limits are in [docs/WIDEBAND.md](docs/WIDEBAND.md).
+
 ## Windows and Linux
 
 Requirements: Python 3 and ffmpeg on PATH. Playback uses `winsound` from the standard library on the default output device, or `aplay` on Linux.
