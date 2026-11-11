@@ -360,36 +360,36 @@ def cmd_auxloop(args):
 
 
 def jack_state():
-    """What the Mac currently thinks is in the jack: (input present, output present, the codec's last detection)."""
+    """What the Mac currently thinks is in the jack: (input present, output present, the codec's detection attempts)."""
     exe = helper("auxin")
     devs = [l.split("\t") for l in subprocess.run([exe, "list"], capture_output=True, text=True).stdout.splitlines() if l]
     has_in = any(d[3] == "1" for d in devs)
     out = subprocess.run(["system_profiler", "SPAudioDataType"], capture_output=True, text=True).stdout
-    has_out = "External Headphones" in out or "Headphones" in out
+    has_out = "External Headphones" in out
     reg = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True, text=True).stdout
-    det = ""
-    m = re.findall(r'"headset info"=\{([^}]*)\}', reg)
-    if m:
-        mic = re.search(r'"microphone"=(Yes|No)', m[-1]); det = "codec says microphone: " + (mic.group(1) if mic else "?")
-    return has_in, has_out, det
+    line = next((l for l in reg.splitlines() if '"DetectHistory"' in l), "")
+    tries = []
+    for m in re.finditer(r'"DetectTime"=(\d+),"HSSwitchDetect"=\(([^)]*)\).*?"DetectConfidence"="([^"]*)","MicDetect"=(Yes|No)', line):
+        tries.append("%5.1f s: switch %s, microphone %s (%s)" % (int(m.group(1)) / 1000.0, m.group(2).replace('"', ''), m.group(4), m.group(3)))
+    return has_in, has_out, tuple(tries)
 
 
 def cmd_auxwatch(args):
-    """Live readout while trying plugs and resistors: one line every time the Mac's view of the jack changes."""
+    """Live readout while trying plugs and resistors: one block every time the Mac's view of the jack changes, with the
+    audio chip's own detection attempts (time after the plug went in, what it measured)."""
     import time
-    secs = float(opt(args, "--secs", 900)); t0 = time.time(); last = None
-    print("watching the headphone jack for %d s (Ctrl+C to stop). Try a connection, wait 2 s, look here." % secs)
+    secs = float(opt(args, "--secs", 7200)); t0 = time.time(); last = None
+    print("watching the headphone jack (Ctrl+C to stop). The chip checks for a microphone several times after a plug-in.", flush=True)
     while time.time() - t0 < secs:
         st = jack_state()
         if st != last:
-            has_in, has_out, det = st
-            print("%s  plug detected: %-3s  INPUT: %-12s %s" % (time.strftime("%H:%M:%S"), "yes" if has_out else "no",
-                  "YES, present" if has_in else "no", det), flush=True)
-            if has_in: print("          the input is there. Keep the connection as it is and run: python3 -I jackrx.py aux", flush=True)
+            has_in, has_out, tries = st
+            print("%s  plug detected: %-3s  INPUT: %s" % (time.strftime("%H:%M:%S"), "yes" if has_out else "no", "YES, present" if has_in else "no"), flush=True)
+            for t in tries[-8:]: print("            chip check at " + t, flush=True)
+            if has_in: print("            the input is there: leave the plug in.", flush=True)
             last = st
-        time.sleep(1.0)
+        time.sleep(0.7)
     return 0
-
 
 
 def main():
