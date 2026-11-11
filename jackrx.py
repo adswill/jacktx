@@ -6,6 +6,7 @@
   python3 -I jackrx.py fm 93.9                 one broadcast FM station: audio to a WAV, stereo pilot, RDS name and text
   python3 -I jackrx.py sweep                   the whole FM band (87.5-108 MHz): spectrum, every station, RDS of the strongest
   python3 -I jackrx.py sweep --band 60-80      any band: spectrum and the strongest signals (no FM decoding outside 87.5-108)
+  python3 -I jackrx.py auxwatch                live readout while trying plugs: says when the Mac shows an input on the jack
   python3 -I jackrx.py auxloop                 self-test: the jack plays tones while its own input records them
   python3 -I jackrx.py aux                     the headphone jack as an input (only when the Mac offers one): spectrum up to
                                                48 kHz, VLF stations, and FM stations that fold into the audio band
@@ -358,6 +359,39 @@ def cmd_auxloop(args):
 
 
 
+def jack_state():
+    """What the Mac currently thinks is in the jack: (input present, output present, the codec's last detection)."""
+    exe = helper("auxin")
+    devs = [l.split("\t") for l in subprocess.run([exe, "list"], capture_output=True, text=True).stdout.splitlines() if l]
+    has_in = any(d[3] == "1" for d in devs)
+    out = subprocess.run(["system_profiler", "SPAudioDataType"], capture_output=True, text=True).stdout
+    has_out = "External Headphones" in out or "Headphones" in out
+    reg = subprocess.run(["ioreg", "-l", "-w0"], capture_output=True, text=True).stdout
+    det = ""
+    m = re.findall(r'"headset info"=\{([^}]*)\}', reg)
+    if m:
+        mic = re.search(r'"microphone"=(Yes|No)', m[-1]); det = "codec says microphone: " + (mic.group(1) if mic else "?")
+    return has_in, has_out, det
+
+
+def cmd_auxwatch(args):
+    """Live readout while trying plugs and resistors: one line every time the Mac's view of the jack changes."""
+    import time
+    secs = float(opt(args, "--secs", 900)); t0 = time.time(); last = None
+    print("watching the headphone jack for %d s (Ctrl+C to stop). Try a connection, wait 2 s, look here." % secs)
+    while time.time() - t0 < secs:
+        st = jack_state()
+        if st != last:
+            has_in, has_out, det = st
+            print("%s  plug detected: %-3s  INPUT: %-12s %s" % (time.strftime("%H:%M:%S"), "yes" if has_out else "no",
+                  "YES, present" if has_in else "no", det), flush=True)
+            if has_in: print("          the input is there. Keep the connection as it is and run: python3 -I jackrx.py aux", flush=True)
+            last = st
+        time.sleep(1.0)
+    return 0
+
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -366,6 +400,7 @@ def main():
     if args[0] == "sweep": return cmd_sweep(args)
     if args[0] == "aux": return cmd_aux(args)
     if args[0] == "auxloop": return cmd_auxloop(args)
+    if args[0] == "auxwatch": return cmd_auxwatch(args)
     die("unknown command %r (fm, sweep, aux)" % args[0])
 
 
