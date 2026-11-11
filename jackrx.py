@@ -6,6 +6,8 @@
   python3 -I jackrx.py fm 93.9                 one broadcast FM station: audio to a WAV, stereo pilot, RDS name and text
   python3 -I jackrx.py sweep                   the whole FM band (87.5-108 MHz): spectrum, every station, RDS of the strongest
   python3 -I jackrx.py sweep --band 60-80      any band: spectrum and the strongest signals (no FM decoding outside 87.5-108)
+  python3 -I jackrx.py aux                     the headphone jack as an input (only when the Mac offers one): spectrum up to
+                                               48 kHz, VLF stations, and FM stations that fold into the audio band
 
 Options: --secs N (capture length, default 12 for fm, 10 per window for sweep), --lna N --vga N --amp 0|1 (default: automatic),
          --out FILE.wav, --html FILE.html (sweep picture), --decode N (stations to decode in a sweep, default 12),
@@ -185,6 +187,10 @@ def cmd_sweep(args):
         print("%-10.1f %+6.1f  %-6s %-5s %-9s %s" % (s["freq"] / 1e6, s["snr"], "stereo" if s["pilot"] > 15 else "", s["pi"], s["ps"], s["rt"]))
     print("\n%d signals in %s MHz. To listen to one: python3 -I jackrx.py fm FREQ" % (len(uniq), band))
     write_html(html, band, spec, uniq)
+    if is_fm:
+        import json
+        os.makedirs(CACHE, exist_ok=True)
+        json.dump([{"mhz": round(x["freq"] / 1e6, 2), "name": x["ps"], "db": round(x["snr"], 1)} for x in uniq], open(os.path.join(CACHE, "last-fm-sweep.json"), "w"))
     print("spectrum picture: " + html)
     return 0
 
@@ -215,13 +221,112 @@ document.getElementById('t').innerHTML='<tr><th>MHz</th><th>dB over floor</th><t
     open(path, "w").write(doc)
 
 
+# ---------------------------------------------------------------- the jack as an input
+VLF = [(16.4, "JXN Norway"), (17.2, "SAQ Sweden"), (18.1, "RDL Russia"), (18.2, "VTX India"), (19.6, "GQD UK"), (19.8, "NWC Australia"),
+       (20.27, "ICV Italy"), (20.9, "FTA France"), (21.4, "NPM Hawaii"), (21.75, "HWU France"), (22.1, "GQD UK"), (22.2, "JJI Japan"),
+       (23.4, "DHO38 Germany"), (24.0, "NAA USA"), (24.8, "NLK USA"), (25.2, "NML USA"), (26.7, "TBB Turkey"), (37.5, "TFK Iceland"),
+       (40.0, "JJY Japan"), (45.9, "NSY Italy"), (60.0, "MSF UK / WWVB / JJY"), (68.5, "BPC China"), (77.5, "DCF77 Germany")]
+
+AUX_HELP = """The Mac offers no input on the headphone jack right now.
+It only creates one when the plug has a microphone contact with a microphone-like load on it (about 1-2 kOhm to ground).
+A plain 3-pole aux plug shorts that contact to ground inside the socket, so nothing at the free end can change it.
+What works:
+  1. a 4-pole (3 black rings) cable: 1-2 kOhm between the sleeve and the ring next to it on the free end; the wire goes on the sleeve
+  2. a headset splitter (mic + headphones to one 4-pole plug) with a microphone, or that resistor, in its mic socket
+  3. experiment: pull a 3-pole plug out by one notch (about 3 mm) and put the resistor between ring and sleeve of the free end
+Run this command again after each try: it shows at once whether the input appeared."""
+
+
+def _fft(re, im):
+    n = len(re); j = 0
+    for i in range(1, n):
+        bit = n >> 1
+        while j & bit: j ^= bit; bit >>= 1
+        j |= bit
+        if i < j: re[i], re[j] = re[j], re[i]; im[i], im[j] = im[j], im[i]
+    ln = 2
+    while ln <= n:
+        ang = -2 * math.pi / ln; wr, wi = math.cos(ang), math.sin(ang)
+        for i in range(0, n, ln):
+            cr, ci = 1.0, 0.0
+            for k in range(i, i + ln // 2):
+                m = k + ln // 2; tr = re[m] * cr - im[m] * ci; ti = re[m] * ci + im[m] * cr
+                re[m] = re[k] - tr; im[m] = im[k] - ti; re[k] += tr; im[k] += ti
+                cr, ci = cr * wr - ci * wi, cr * wi + ci * wr
+        ln <<= 1
+
+
+def aux_spectrum(x, nfft=16384):
+    """Averaged power spectrum (dB) of a real signal, bins 0..nfft/2."""
+    win = [0.5 - 0.5 * math.cos(2 * math.pi * i / nfft) for i in range(nfft)]; acc = [0.0] * (nfft // 2); blocks = 0
+    for st in range(0, len(x) - nfft + 1, nfft):
+        re = [x[st + i] * win[i] for i in range(nfft)]; im = [0.0] * nfft; _fft(re, im)
+        for k in range(nfft // 2): acc[k] += re[k] * re[k] + im[k] * im[k]
+        blocks += 1
+        if blocks >= 24: break
+    return [10 * math.log10(max(v / max(1, blocks), 1e-30)) for v in acc]
+
+
+def fm_folds(rate, stations):
+    """FM stations that the converter's fast sampler (128 x the audio rate) would fold into the audio band."""
+    clk = 128.0 * (44100 if rate in (44100, 88200) else 48000); out = []
+    for mhz, name in stations:
+        k = round(mhz * 1e6 / clk); off = mhz * 1e6 - k * clk
+        if abs(off) < rate / 2: out.append((mhz, name, k, off))
+    return out
+
+
+def cmd_aux(args):
+    exe = helper("auxin")
+    devs = [l.split("\t") for l in subprocess.run([exe, "list"], capture_output=True, text=True).stdout.splitlines() if l]
+    uid = opt(args, "--uid")
+    jack = [d for d in devs if d[3] == "1"]
+    print("input devices: " + "; ".join("%s (%s)" % (d[1], d[0]) for d in devs))
+    if not uid:
+        if not jack:
+            print(AUX_HELP); return 1
+        uid = jack[0][0]; print("the jack's input is present: %s" % jack[0][1])
+    if uid == "BuiltInMicrophoneDevice": die("the built-in microphone is never recorded")
+    dev = next((d for d in devs if d[0] == uid), None)
+    if not dev: die("no input device with UID " + uid)
+    secs = float(opt(args, "--secs", 6)); stations = []
+    try:
+        import json
+        stations = [(s["mhz"], s["name"]) for s in json.load(open(os.path.join(CACHE, "last-fm-sweep.json")))]
+    except (OSError, ValueError): stations = [(f, "") for f in (91.5, 92.0, 93.0, 93.9, 97.1)]
+    outdir = opt(args, "--outdir", os.getcwd())
+    for rate in [int(r) for r in dev[2].split() if int(r) in (44100, 48000, 88200, 96000)]:
+        raw = os.path.join(outdir, "aux-%d.f32" % rate)
+        r = subprocess.run([exe, "rec", uid, str(rate), str(secs), raw], capture_output=True, text=True)
+        if r.returncode: print("%d Hz: %s" % (rate, r.stderr.strip())); continue
+        x = array.array("f"); x.frombytes(open(raw, "rb").read())
+        if not x or max(abs(v) for v in x) == 0: print("%d Hz: recorded silence (all zeros)" % rate); continue
+        db = aux_spectrum(x); n = len(db); binw = rate / 2 / n; floor = sorted(db)[n // 2]
+        print("\n== %d Hz: %.1f s, peak %.1f dBFS, noise floor %.1f dB per %.1f Hz bin" % (rate, len(x) / rate, 20 * math.log10(max(abs(v) for v in x)), floor, binw))
+        pk = sorted([k for k in range(3, n - 1) if db[k] > floor + 10 and db[k] >= db[k - 1] and db[k] >= db[k + 1]], key=lambda k: -db[k])[:14]
+        for k in sorted(pk):
+            f = k * binw; tag = next((nm for khz, nm in VLF if abs(f - khz * 1e3) < 120), "")
+            if f < 1000 and min(abs(f - h * 50) for h in range(1, 21)) < 2 * binw: tag = "mains hum (50 Hz harmonic)"
+            print("   %9.1f Hz  +%.1f dB  %s" % (f, db[k] - floor, tag))
+        if not pk: print("   no carrier more than 10 dB over the floor")
+        folds = fm_folds(rate, stations)
+        for mhz, name, k, off in folds:
+            kb = int(abs(off) / binw); band = db[max(1, kb - int(15e3 / binw)):min(n, kb + int(15e3 / binw))]
+            print("   FM %.1f MHz %s: harmonic %d of the %.4f MHz sampler puts it at %.1f kHz -> %+.1f dB over the floor there"
+                  % (mhz, name, k, 128 * (44100 if rate in (44100, 88200) else 48000) / 1e6, abs(off) / 1e3, sorted(band)[len(band) // 2] - floor))
+        if not folds: print("   no known FM station folds into the audio band at this rate")
+    return 0
+
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
         print(__doc__); return 0
     if args[0] in ("fm", "wfm", "rds"): return cmd_fm(args)
     if args[0] == "sweep": return cmd_sweep(args)
-    die("unknown command %r (fm, sweep)" % args[0])
+    if args[0] == "aux": return cmd_aux(args)
+    die("unknown command %r (fm, sweep, aux)" % args[0])
 
 
 if __name__ == "__main__":
