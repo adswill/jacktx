@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later. Part of jacktx. Served by `jackrx.py auxview`. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jacktx aux radio</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0a0f16; color: #e8eef5; font: 14px -apple-system, Helvetica, Arial, sans-serif; }
+  #bar { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 8px 14px; background: #101822; border-bottom: 1px solid #263242; }
+  #bar b { font-size: 16px; }
+  #bar label { color: #9fb0c3; display: flex; gap: 6px; align-items: center; }
+  #bar input[type=range] { width: 110px; }
+  button { background: #1b2836; color: #e8eef5; border: 1px solid #33455a; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button.on { background: #24506b; border-color: #4cc9f0; }
+  #read { margin-left: auto; color: #ffd166; font-variant-numeric: tabular-nums; min-width: 250px; text-align: right; }
+  #wrap { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; }
+  #view { flex: 1; position: relative; min-height: 0; }
+  canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  #msg { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); color: #ff9f9f; font-size: 17px; text-align: center; max-width: 80%; }
+  #foot { padding: 5px 14px; color: #7f8fa3; font-size: 12px; background: #101822; border-top: 1px solid #263242; }
+</style></head>
+<body><div id="wrap">
+  <div id="bar">
+    <b>jacktx aux radio</b>
+    <button id="pause">Pause</button>
+    <button id="hold">Peak hold</button>
+    <button id="marks" class="on">Mark known noise</button>
+    <label>Top <input id="top" type="range" min="-120" max="0" value="-20"><span id="topv"></span></label>
+    <label>Bottom <input id="bot" type="range" min="-170" max="-40" value="-130"><span id="botv"></span></label>
+    <label>Smooth <input id="avg" type="range" min="0" max="95" value="60"></label>
+    <button id="auto">Auto range</button>
+    <button id="reset">Full span</button>
+    <button id="png">Save picture</button>
+    <span id="read"></span>
+  </div>
+  <div id="view"><canvas id="c"></canvas><div id="msg"></div></div>
+  <div id="foot">Top: spectrum now. Bottom: waterfall, newest line at the top. Drag across the picture to zoom into a frequency range, double-click for the full span.
+    This is the sound band the Mac records from the jack (0 to half the sample rate): a radio signal shows here only after the detector on the cable has turned it into audio.</div>
+</div>
+<script>
+const cv = document.getElementById('c'), cx = cv.getContext('2d'), msg = document.getElementById('msg');
+let nb = 0, rate = 96000, seq = 0, sm = null, peak = null, paused = false, hold = false, marks = true;
+let f0 = 0, f1 = 48000, drag = null, hover = null, rows = [], wf = null, wfw = 0, wfh = 0;
+const $ = id => document.getElementById(id);
+const pal = []; for (let i = 0; i < 256; i++) { const t = i / 255;      // dark blue -> cyan -> yellow -> white
+  const r = Math.round(255 * Math.min(1, Math.max(0, 1.6 * t - 0.5))), g = Math.round(255 * Math.min(1, Math.max(0, 1.5 * t - 0.15))),
+        b = Math.round(255 * Math.min(1, Math.max(0, t < 0.5 ? 0.25 + 1.3 * t : 1.5 - 1.6 * t + (t > 0.85 ? (t - 0.85) * 5 : 0)))); pal.push([r, g, b]); }
+function size() { const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1; cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); wf = null; }
+addEventListener('resize', size); size();
+const L = () => 62 * (devicePixelRatio || 1), R = () => 12 * (devicePixelRatio || 1);
+const specH = () => Math.round(cv.height * 0.38), axisH = () => 26 * (devicePixelRatio || 1);
+const fx = f => L() + (f - f0) / (f1 - f0) * (cv.width - L() - R()), xf = x => f0 + (x - L()) / (cv.width - L() - R()) * (f1 - f0);
+function vTop() { return +$('top').value; } function vBot() { return Math.min(+$('bot').value, vTop() - 10); }
+function fmt(f) { return f >= 1000 ? (f / 1000).toFixed(f1 - f0 < 3000 ? 3 : 2) + ' kHz' : f.toFixed(0) + ' Hz'; }
+function binAt(f) { return Math.max(0, Math.min(nb - 1, Math.round(f / (rate / 2) * nb))); }
+function colVal(arr, x, w) {            // strongest bin that falls on this pixel column
+  const a = binAt(xf(x)), b = Math.max(a + 1, binAt(xf(x + w))); let m = -1e9; for (let k = a; k < b && k < nb; k++) if (arr[k] > m) m = arr[k]; return m; }
+function draw() {
+  const W = cv.width, H = cv.height, d = devicePixelRatio || 1, sh = specH(), ah = axisH(), T = vTop(), B = vBot();
+  cx.fillStyle = '#0a0f16'; cx.fillRect(0, 0, W, H);
+  $('topv').textContent = T + ' dB'; $('botv').textContent = B + ' dB';
+  if (!sm) return;
+  cx.font = (12 * d) + 'px -apple-system, Helvetica, Arial'; cx.lineWidth = 1;
+  // grid and axes
+  cx.strokeStyle = '#1e2936'; cx.fillStyle = '#8fa1b5'; cx.textAlign = 'right';
+  for (let v = Math.ceil(B / 10) * 10; v <= T; v += 10) { const y = sh - (v - B) / (T - B) * (sh - 8 * d); cx.beginPath(); cx.moveTo(L(), y); cx.lineTo(W - R(), y); cx.stroke(); cx.fillText(v + ' dB', L() - 6 * d, y + 4 * d); }
+  const span = f1 - f0, steps = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]; let st = steps.find(s => span / s <= 12) || 10000;
+  cx.textAlign = 'center';
+  for (let f = Math.ceil(f0 / st) * st; f <= f1; f += st) { const x = fx(f); cx.beginPath(); cx.moveTo(x, 0); cx.lineTo(x, sh); cx.stroke(); cx.fillText(fmt(f), x, sh + 17 * d); }
+  // known noise
+  if (marks) { cx.fillStyle = 'rgba(255,120,120,0.10)'; const hx = fx(Math.min(3000, f1)); if (hx > L()) { cx.fillRect(L(), 0, hx - L(), sh); cx.fillStyle = '#ff9f9f'; cx.textAlign = 'left'; if (f0 < 1500) cx.fillText('mains hum', L() + 4 * d, 14 * d); }
+    cx.strokeStyle = 'rgba(255,209,102,0.35)'; for (let k = 1; k * 1000.52 < f1; k++) { const f = k * 1000.52; if (f < f0 || span > 30000 && k % 8) continue; const x = fx(f); cx.beginPath(); cx.moveTo(x, sh - 10 * d); cx.lineTo(x, sh); cx.stroke(); } }
+  // spectrum
+  const line = (arr, col, w) => { cx.strokeStyle = col; cx.lineWidth = w * d; cx.beginPath(); let first = true;
+    for (let x = L(); x < W - R(); x++) { const v = colVal(arr, x, 1), y = sh - (Math.max(B, Math.min(T, v)) - B) / (T - B) * (sh - 8 * d); if (first) { cx.moveTo(x, y); first = false; } else cx.lineTo(x, y); } cx.stroke(); };
+  if (hold && peak) line(peak, '#ef476f', 1); line(sm, '#4cc9f0', 1.3);
+  // waterfall
+  const wy = sh + ah, ww = W - L() - R(), wh = H - wy; if (ww > 10 && wh > 10) {
+    if (!wf || wfw !== ww || wfh !== wh) { wf = cx.createImageData(ww, wh); wfw = ww; wfh = wh; }
+    const dt = wf.data, n = Math.min(rows.length, wh);
+    for (let r = 0; r < wh; r++) { const row = r < n ? rows[rows.length - 1 - r] : null; let o = r * ww * 4;
+      for (let x = 0; x < ww; x++, o += 4) { let c = pal[0]; if (row) { const v = colVal(row, x + L(), 1); c = pal[Math.max(0, Math.min(255, Math.round((v - B) / (T - B) * 255)))]; } dt[o] = c[0]; dt[o + 1] = c[1]; dt[o + 2] = c[2]; dt[o + 3] = 255; } }
+    cx.putImageData(wf, L(), wy); cx.fillStyle = '#8fa1b5'; cx.textAlign = 'right'; cx.fillText('now', L() - 6 * d, wy + 12 * d); cx.fillText('older', L() - 6 * d, H - 6 * d); }
+  if (drag) { cx.fillStyle = 'rgba(76,201,240,0.18)'; cx.fillRect(Math.min(drag.a, drag.b), 0, Math.abs(drag.b - drag.a), H); }
+  if (hover !== null) { cx.strokeStyle = 'rgba(255,209,102,0.6)'; cx.lineWidth = 1; cx.beginPath(); cx.moveTo(hover, 0); cx.lineTo(hover, H); cx.stroke();
+    const f = xf(hover); $('read').textContent = fmt(f) + '   ' + sm[binAt(f)].toFixed(1) + ' dB'; }
+}
+async function poll() {
+  try { const r = await fetch('/data?from=' + seq, { cache: 'no-store' }); if (r.status === 503) { msg.textContent = await r.text(); setTimeout(poll, 1500); return; }
+    const buf = await r.arrayBuffer(), dv = new DataView(buf); const s0 = dv.getUint32(0, true), cnt = dv.getUint32(4, true), n = dv.getUint32(8, true); rate = dv.getFloat32(12, true);
+    msg.textContent = cnt || sm ? '' : 'waiting for the jack input...';
+    if (n && n !== nb) { nb = n; sm = null; peak = null; rows = []; f0 = 0; f1 = rate / 2; }
+    const a = +$('avg').value / 100;
+    for (let i = 0; i < cnt; i++) { const fr = new Float32Array(buf, 16 + i * n * 4, n); if (paused) continue;
+      if (!sm) { sm = Float32Array.from(fr); peak = Float32Array.from(fr); } else for (let k = 0; k < n; k++) { sm[k] = a * sm[k] + (1 - a) * fr[k]; if (fr[k] > peak[k]) peak[k] = fr[k]; }
+      rows.push(Float32Array.from(fr)); if (rows.length > 1400) rows.shift(); }
+    seq = s0 + cnt; draw();
+  } catch (e) { msg.textContent = 'the viewer program is not answering (stopped?)'; }
+  setTimeout(poll, 70);
+}
+$('pause').onclick = e => { paused = !paused; e.target.classList.toggle('on', paused); e.target.textContent = paused ? 'Resume' : 'Pause'; };
+$('hold').onclick = e => { hold = !hold; e.target.classList.toggle('on', hold); if (hold && sm) peak = Float32Array.from(sm); draw(); };
+$('marks').onclick = e => { marks = !marks; e.target.classList.toggle('on', marks); draw(); };
+$('reset').onclick = () => { f0 = 0; f1 = rate / 2; draw(); };
+$('auto').onclick = () => { if (!sm) return; const s = Array.from(sm.subarray(binAt(f0), binAt(f1) + 1)).sort((a, b) => a - b); $('bot').value = Math.round(s[Math.floor(s.length * 0.1)] - 8); $('top').value = Math.round(s[s.length - 1] + 6); draw(); };
+$('png').onclick = () => { const a = document.createElement('a'); a.download = 'aux-radio-' + new Date().toISOString().replace(/[:.]/g, '-') + '.png'; a.href = cv.toDataURL('image/png'); a.click(); };
+for (const id of ['top', 'bot']) $(id).oninput = draw;
+const px = e => (e.clientX - cv.getBoundingClientRect().left) * (devicePixelRatio || 1);
+cv.onmousedown = e => { drag = { a: px(e), b: px(e) }; };
+cv.onmousemove = e => { hover = px(e); if (drag) drag.b = px(e); draw(); };
+cv.onmouseleave = () => { hover = null; $('read').textContent = ''; draw(); };
+addEventListener('mouseup', () => { if (drag && Math.abs(drag.b - drag.a) > 8) { const a = xf(Math.min(drag.a, drag.b)), b = xf(Math.max(drag.a, drag.b)); f0 = Math.max(0, a); f1 = Math.min(rate / 2, b); } drag = null; draw(); });
+cv.ondblclick = () => { f0 = 0; f1 = rate / 2; draw(); };
+poll();
+</script></body></html>

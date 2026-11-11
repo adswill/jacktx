@@ -10,6 +10,8 @@
   python3 -I jackrx.py auxloop                 self-test: the jack plays tones while its own input records them
   python3 -I jackrx.py aux                     the headphone jack as an input (only when the Mac offers one): spectrum up to
                                                48 kHz, VLF stations, and FM stations that fold into the audio band
+  python3 -I jackrx.py auxview                 live spectrum and waterfall of the jack's input in the browser
+                                               (--rate 96000, --nfft 4096, --fps 15, --port 8770, --no-open)
 
 Options: --secs N (capture length, default 12 for fm, 10 per window for sweep), --lna N --vga N --amp 0|1 (default: automatic),
          --out FILE.wav, --html FILE.html (sweep picture), --decode N (stations to decode in a sweep, default 12),
@@ -18,7 +20,7 @@ Options: --secs N (capture length, default 12 for fm, 10 per window for sweep), 
 The HackRF runs at 10 Msps (the HackRF Pro's centre frequency is exact up to 10 Msps and at 20 Msps only). The two helper
 programs fmtool and fmrx are built from the .swift files next to this script on first use (needs the Xcode command line tools).
 """
-import array, math, os, re, shutil, subprocess, sys, tempfile
+import array, math, os, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "cache")
@@ -392,6 +394,71 @@ def cmd_auxwatch(args):
     return 0
 
 
+def cmd_auxview(args):
+    """Live spectrum and waterfall of the jack's input: auxspec writes dB frames, this serves them to a page on 127.0.0.1."""
+    import struct, threading, collections
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    rate, nfft, fps, port = int(opt(args, "--rate", 96000)), int(opt(args, "--nfft", 4096)), float(opt(args, "--fps", 15)), int(opt(args, "--port", 8770))
+    nb = nfft // 2
+    frames, state = collections.deque(maxlen=400), {"seq": 0, "err": "starting", "proc": None}
+    lock = threading.Lock()
+
+    def jack_uid():
+        devs = [l.split("\t") for l in subprocess.run([helper("auxin"), "list"], capture_output=True, text=True).stdout.splitlines() if l]
+        jack = [d for d in devs if d[3] == "1"]
+        return jack[0][0] if jack else None
+
+    def reader():
+        while True:                                     # keeps trying: the input appears and disappears with the plug
+            uid = jack_uid()
+            if not uid:
+                state["err"] = "The Mac shows no input on the headphone jack. Plug in the cable with the 5.6 k resistor (see: jackrx.py auxwatch)."
+                time.sleep(1.5); continue
+            pr = subprocess.Popen([helper("auxspec"), uid, str(rate), str(nfft), str(fps)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            state["proc"] = pr; state["err"] = ""
+            while True:
+                b = pr.stdout.read(nb * 4)
+                if len(b) < nb * 4: break
+                with lock:
+                    frames.append(b); state["seq"] += 1
+            state["err"] = "The jack's input stopped (unplugged?). Waiting for it to come back."
+            time.sleep(1.0)
+
+    def page(): return open(os.path.join(HERE, "auxview.html"), "rb").read()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def send(self, code, ctype, body):
+            self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
+        def do_GET(self):
+            if self.path.startswith("/data"):
+                m = re.search(r"from=(\d+)", self.path); frm = int(m.group(1)) if m else 0
+                with lock:
+                    seq, have = state["seq"], list(frames)
+                if state["err"] and not have: return self.send(503, "text/plain; charset=utf-8", state["err"].encode())
+                first = seq - len(have); start = max(frm, first, seq - 60)      # a slow page skips ahead instead of falling behind
+                out = have[start - first:] if start < seq else []
+                return self.send(200, "application/octet-stream", struct.pack("<IIIf", start, len(out), nb, float(rate)) + b"".join(out))
+            if self.path in ("/", "/index.html"): return self.send(200, "text/html; charset=utf-8", page())
+            self.send(404, "text/plain", b"not found")
+
+    threading.Thread(target=reader, daemon=True).start()
+    srv = None
+    for p in range(port, port + 20):                    # the first free port from --port upwards
+        try: srv = ThreadingHTTPServer(("127.0.0.1", p), H); port = p; break
+        except OSError: continue
+    if not srv: die("no free port between %d and %d: pass --port" % (port, port + 19))
+    url = "http://127.0.0.1:%d/" % port
+    print("aux radio viewer: %s   (Ctrl-C stops it)" % url, flush=True)
+    if "--no-open" not in args: subprocess.run(["open", url])
+    try: srv.serve_forever()
+    except KeyboardInterrupt: pass
+    finally:
+        if state["proc"]: state["proc"].terminate()
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -401,6 +468,7 @@ def main():
     if args[0] == "aux": return cmd_aux(args)
     if args[0] == "auxloop": return cmd_auxloop(args)
     if args[0] == "auxwatch": return cmd_auxwatch(args)
+    if args[0] == "auxview": return cmd_auxview(args)
     die("unknown command %r (fm, sweep, aux)" % args[0])
 
 

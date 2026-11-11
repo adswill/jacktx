@@ -152,3 +152,13 @@ Requirements: Python 3 and ffmpeg on PATH. Playback uses `winsound` from the sta
 GPL-3.0-or-later ([LICENSE](LICENSE)) with one attribution term ([ADDITIONAL-TERMS.md](ADDITIONAL-TERMS.md)): keep the notices and credit jacktx in anything you build from it.
 
 Algorithms and tables used, with credit: WSJT-X by K1JT et al. (FT8, WSPR; GPL-3), ft8_lib by Kārlis Goba (MIT), RS41 framing after rs1729 by Zilog80 (GPL-3), DVB-S2 tables from ETSI EN 302 307.
+
+### Live view of the jack's input
+
+```
+python3 -I jackrx.py auxview
+```
+
+Opens a page with the live spectrum (top) and waterfall (bottom) of the headphone jack's input, 0 to 48 kHz. It needs the Mac to
+offer the input (a 4-pole plug with about 5.6 kOhm between the microphone contact and ground, see `auxwatch`). Drag to zoom,
+double-click for the full span, "Save picture" writes a PNG. The built-in microphone is never opened.
