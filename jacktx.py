@@ -5,6 +5,8 @@
 # (96 kHz output rate); audio at f appears as RF at 6.144 MHz + f (usable f 2..46 kHz). Python stdlib + ffmpeg/afconvert/afplay.
 #   python3 -I jacktx.py -<mode> [--level -1] [--render-only]      python3 -I jacktx.py --selftest
 # Windows/Linux: playback via winsound / aplay / sounddevice, --clock MHZ for the chip's clock, -find to locate it (see README).
+# --freq MHZ moves any mode next to a clock line (planner: both rate families, harmonics, both images); -rx / -calibrate use an
+# SDR (rtl_sdr or hackrf_transfer, or --from-file); --iq / --wav send your own recordings. numpy is optional (faster DSP).
 import array, math, os
 # ---- common helpers (merged into jacktx.py) ----
 import array, math
@@ -125,7 +127,7 @@ _WSPR_SYNC = "110000001000111000100101111000000010010100000010110011010001101000
 # ---------------------------------------------------------------- shared small helpers of the digital modes
 
 def _aprs_mhz(audio_hz):
-    return "%.6f MHz" % ((CLOCK_HZ + audio_hz) / 1e6)
+    return "%.6f MHz" % ((RF_BASE + audio_hz) / 1e6)
 
 
 def _aprs_cache(cache_dir, name, build):
@@ -915,12 +917,12 @@ def mode_sonde(rate=RATE, cache_dir=None, seconds=60):
         lon = _RS41_LON + ve * k / (111320.0 * math.cos(math.radians(_RS41_LAT)))
         fr = _rs41_frame(1000 + k, t0 + k, _RS41_LAT, lon, alt, ve, 0.0, vup, cal, k)
         _rs41_burst(_rs41_symbols(fr), rate, _RS41_AUDIO_HZ, out, int((k + 0.05) * rate))
-    rf = CLOCK_HZ + _RS41_AUDIO_HZ
+    rf = RF_BASE + _RS41_AUDIO_HZ
     return {"samples": out, "cycle": None, "phase": 0, "tune": [
         "RS41 radiosonde, serial %s, 4800 baud GFSK +-2.4 kHz (standard; OnAir sonde_gen.cpp:31, slicer is sign-based after a fixed +-10 kHz filter, sonde_rx.cpp:44), ~12 kHz wide, one frame a second" % _RS41_SERIAL,
         "RF %.4f MHz (audio %.0f Hz). OnAir mode: Radiosonde (sonde). It scans its whole capture for carriers," % (rf / 1e6, _RS41_AUDIO_HZ),
-        "  so tune the centre a bit off it (e.g. %.3f MHz, 2 Msps or more). The mirror at %.4f MHz is the same sonde, inverted"
-        % ((CLOCK_HZ - 44000) / 1e6, (CLOCK_HZ - _RS41_AUDIO_HZ) / 1e6),
+        "  so tune the centre a bit off it (e.g. %.3f MHz, 2 Msps or more). The mirror at %s is the same sonde, inverted"
+        % ((rf - 59000) / 1e6, mirror_mhz(rf)),
         "  (OnAir decodes inverted RS41 too). Map pin: Greenwich 51.48 N 0.00 W, climbing 5 m/s from 50 m, drifting east 3 m/s.",
         "  Loop %d s: temperature/humidity appear once calibration subframes 3..7 have arrived (~8 s)." % seconds]}
 
@@ -1098,7 +1100,7 @@ def mode_noaa(rate=RATE, cache_dir=None, lines=_APT_LINES):
         if path:
             os.makedirs(cache_dir, exist_ok=True)
             with open(path, "wb") as fh: fh.write(out.tobytes())
-    rf = CLOCK_HZ + _APT_AUDIO_HZ
+    rf = RF_BASE + _APT_AUDIO_HZ
     return {"samples": out, "cycle": None, "phase": 0, "tune": [
         "NOAA APT weather image: FM +-8 kHz (weak-signal choice; satellites use +-17), 2400 Hz AM subcarrier, 4160 words/s, 2 lines/s, %d-line loop (%d s)" % (lines, lines // 2),
         "RF %.4f MHz (audio %.0f Hz), occupies ~%.4f..%.4f MHz (Carson ~25 kHz)" % (rf / 1e6, _APT_AUDIO_HZ, (rf - 12500) / 1e6, (rf + 12500) / 1e6),
@@ -1463,14 +1465,14 @@ def mode_dvbs2(rate, cache_dir):
         with open(cpath + ".tmp", "wb") as f: out.tofile(f)
         os.replace(cpath + ".tmp", cpath)
         info = "ffmpeg gave %d TS packets, loop holds %d" % (got, npk)
-    rf = CLOCK_HZ + _S2_FC; bw = _S2_RS * (1 + _S2_ROLL)
+    rf = RF_BASE + _S2_FC; bw = _S2_RS * (1 + _S2_ROLL)
     tune = ["DVB-S2 at %.6f MHz: QPSK 1/4, short frames (16200), pilots on, roll-off %.2f, %.1f ksym/s, %.1f kHz wide (%.1f-%.1f kHz audio)"
             % (rf / 1e6, _S2_ROLL, _S2_RS / 1e3, bw / 1e3, (_S2_FC - bw / 2) / 1e3, (_S2_FC + bw / 2) / 1e3),
             "TS %.0f bit/s: H.264 160x120 2 fps 6 kbit/s test card 'ONAIR VIA HEADPHONE JACK', service 'ONAIR JACK'; loop %.1f s = %d PLFRAMEs = %d TS packets (%s)"
             % (netrate, secs, nframes, npk, info),
             "OnAir: DVB-S/S2 mode, symbol rate set by hand to 0.032 Msym/s (Auto will not find it: the spectrum search floor is 60 ksym/s).",
             "CAVEAT: the released OnAir UI clamps a manual symbol rate to >= 0.050 Msym/s (app/dvbs/dvbs_ui.cpp:696); 50 ksym/s needs 60 kHz and does",
-            "not fit the 2-46 kHz window, so as released OnAir cannot decode this one. The upper copy (%.3f MHz) is upright; the mirror below is inverted." % (rf / 1e6)]
+            "not fit the 2-46 kHz window, so as released OnAir cannot decode this one. The copy at %.3f MHz is upright; the mirror at %s is inverted." % (rf / 1e6, mirror_mhz(rf))]
     return {"samples": out, "tune": tune, "cycle": None, "phase": 0}
 
 
@@ -1577,7 +1579,8 @@ _SIN = array.array("f", [math.sin(2 * math.pi * i / _SIN_N) for i in range(_SIN_
 
 
 def mhz(audio_hz):
-    return "%.6f MHz" % ((CLOCK_HZ + audio_hz) / 1e6)
+    """RF of a component the mode renders at audio_hz (RF_BASE is the clock by default, moved by --freq)."""
+    return "%.6f MHz" % ((RF_BASE + audio_hz) / 1e6)
 
 
 def tone_segments(segs, rate=RATE, shift=0.0, amp=1.0):
@@ -1967,7 +1970,7 @@ def selftest_main():
 
 def selftest():
     t0 = time.time(); allres = []
-    for name, fn in (("main", selftest_main), ("digi", selftest_digi), ("sat", selftest_sat), ("dvbs2", selftest_dvbs2)):
+    for name, fn in (("main", selftest_main), ("digi", selftest_digi), ("sat", selftest_sat), ("dvbs2", selftest_dvbs2), ("plan/rx", selftest_plan_rx)):
         try: r = fn()
         except Exception as e: r = [(name + " selftest crashed", False, repr(e))]
         allres += r
@@ -2121,86 +2124,1219 @@ def other_os_setup(args, wav):
     return plan, device
 
 
-def write_wav(path, samples, level_db):
+def write_wav(path, samples, level_db, rate=RATE):
     pk = max(1e-9, max(abs(v) for v in samples)); g = 10 ** (level_db / 20) / pk * 32767
     pcm = array.array("h", [int(v * g) for v in samples])
     st = array.array("h", [0]) * (2 * len(pcm)); st[0::2] = pcm; st[1::2] = pcm
     with wave.open(path + ".tmp", "wb") as w:
-        w.setnchannels(2); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(st.tobytes())
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(int(rate)); w.writeframes(st.tobytes())
     os.replace(path + ".tmp", path)
 
 
-MODES = ["am", "nfm", "wfm", "usb", "rtty", "sstv", "wefax", "specart", "aprs", "pocsag", "ft8", "wspr", "multi", "noaa", "sonde", "dvbs2", "find"]
+# ================================================================ frequency planner, DSP, IQ/WAV input, SDR receive, calibration
+# numpy speeds up the DSP when it is installed; every path also works with the standard library alone (slower).
+try:
+    if os.environ.get("JACKTX_NO_NUMPY"): raise ImportError("disabled by JACKTX_NO_NUMPY")
+    import numpy as np
+except Exception:
+    np = None
+import cmath, json, operator, random, shutil
+
+RF_BASE = CLOCK_HZ     # RF of audio 0 Hz in the tune lines: RF = RF_BASE + audio (moved by --freq)
+LINE_HZ = CLOCK_HZ     # the clock line in use; the inverted mirror of a signal at f sits at 2 * LINE_HZ - f
+PPM = 0.0              # --ppm: manual correction of the model clock
+UNCAL_PPM = 50.0       # assumed crystal tolerance when nothing is calibrated (an assumption, not a measurement)
+WIN_LO = 2000.0        # lowest usable audio offset; the top is 0.479 x the output rate (46 kHz at 96 kHz, measured)
+ALL_RATES = (96000, 88200, 192000, 176400, 48000, 44100)   # planner preference: 96 kHz is the measured default
+TX_RANGE = (1e6, 25e6)
+
+# Where each mode puts its signal in the audio it renders at 96 kHz: the reference audio frequency (the one the help table
+# prints: carrier, centre or USB dial) and the occupied band relative to it, in Hz. --freq moves the reference to that RF.
+MODE_RF = {
+    "tone": (12000.0, -50, 50), "am": (24000.0, -7000, 7000), "nfm": (24000.0, -14000, 14000), "wfm": (24000.0, -22000, 22000),
+    "usb": (12000.0, 100, 3500), "rtty": (9875.0, 2025, 2395), "sstv": (10000.0, 1000, 2400), "wefax": (10000.0, 1400, 2400),
+    "specart": (24000.0, -5000, 5000), "aprs": (20000.0, -7000, 7000), "pocsag": (18500.0, -6500, 6500),
+    "ft8": (10500.0, 1500, 1550), "wspr": (10500.0, 1494, 1506), "multi": (24000.0, -18300, 16600),
+    "noaa": (24000.0, -12500, 12500), "sonde": (15000.0, -6000, 6000), "dvbs2": (24000.0, -21600, 21600),
+}
+
+
+def mirror_mhz(rf_hz):
+    return "%.6f MHz" % ((2 * LINE_HZ - rf_hz) / 1e6)
+
+
+def _opt(args, name, conv=str, default=None):
+    if name not in args: return default
+    i = args.index(name)
+    if i + 1 >= len(args): sys.exit("%s needs a value" % name)
+    try: return conv(args[i + 1])
+    except ValueError: sys.exit("%s: bad value %r" % (name, args[i + 1]))
+
+
+def _f32(x):
+    """array('f') from a list, array or numpy array."""
+    if np is not None and isinstance(x, np.ndarray): a = array.array("f"); a.frombytes(x.astype(np.float32).tobytes()); return a
+    return x if isinstance(x, array.array) and x.typecode == "f" else array.array("f", x)
+
+
+# ---------------- planner ----------------
+def family(rate): return 44100 if rate % 44100 == 0 else 48000
+
+
+def model_window(rate): return (WIN_LO, 0.479 * rate)
+
+
+def nominal_clock(rate):
+    """Model clock of a rate family: 6.144 MHz (128 x 48 kHz) for 48/96/192 kHz; the 44.1 kHz family scaled, 5.6448 MHz."""
+    return CLOCK_HZ * (1.0 if family(rate) == 48000 else 44100 / 48000.0) * (1 + PPM * 1e-6)
+
+
+def clock_lines(rates, cal, fmax=26e6):
+    """Every (rate, harmonic) clock line the planner may use, with its window, accuracy and the source of the numbers."""
+    out = []
+    for rate in rates:
+        nom = nominal_clock(rate)
+        fund = cal.get("%d|1" % rate) or next((e for k, e in sorted(cal.items()) if k.endswith("|1") and family(int(k.split("|")[0])) == family(rate)
+                                               and e.get("found")), None)
+        for n in range(1, int(fmax // nom) + 2):
+            e = cal.get("%d|%d" % (rate, n))
+            if e is not None and not e.get("found"): continue                 # calibrated and not there: never plan on it
+            if e and abs(e.get("scale", 1.0) - 1) > 0.05: continue             # offsets scale with n there: modes would be distorted
+            if e: line, src, unc = e["line_hz"], "calibrated %s" % e.get("date", "")[:10], e.get("unc_ppm", 3.0)
+            elif fund and fund.get("found"):
+                line, src, unc = n * fund["line_hz"] / fund.get("n", 1), "%s x the calibrated clock (harmonic not measured)" % _nth(n), fund.get("unc_ppm", 3.0)
+            else: line, src, unc = n * nom, "model" + (", harmonic not verified" if n > 1 else ""), (10.0 if PPM else UNCAL_PPM)
+            win = tuple(e["window"]) if e and e.get("window") else model_window(rate)
+            out.append({"rate": rate, "n": n, "line": line, "win": win, "src": src, "unc_ppm": unc, "measured": bool(e)})
+    return out
+
+
+def _nth(n): return {1: "1st", 2: "2nd", 3: "3rd"}.get(n, "%dth" % n)
+
+
+def plan_freq(f, blo, bhi, tol=10e3, rates=ALL_RATES, cal=None):
+    """Pick rate, clock line, image and audio offset so the reference point lands on f with the band [f+blo, f+bhi] inside the
+    window. Returns (plan or None, all candidates sorted best first). Lower image: the audio is spectrum-inverted so RF stays upright."""
+    cands = []
+    for L in clock_lines(rates, cal or {}):
+        wlo, whi = L["win"]
+        for side in (1, -1):
+            lo, hi = (L["line"] + wlo - blo, L["line"] + whi - bhi) if side > 0 else (L["line"] - whi - blo, L["line"] - wlo - bhi)
+            if hi < lo: continue
+            rf = min(max(f, lo), hi)
+            c = dict(L, side=side, lo=lo, hi=hi, rf=rf, dist=abs(rf - f), audio=side * (rf - L["line"]), acc=L["unc_ppm"] * 1e-6 * rf,
+                     margin=min(rf - lo, hi - rf), want=f, blo=blo, bhi=bhi)
+            cands.append(c)
+    pref = {r: i for i, r in enumerate(ALL_RATES)}
+    cands.sort(key=lambda c: (c["dist"] > 0.5, c["dist"], c["n"], pref.get(c["rate"], 9), -c["margin"]))
+    best = cands[0] if cands else None
+    return (best if best and best["dist"] + best["acc"] <= tol else None), cands
+
+
+def describe_plan(p):
+    fam = "44.1" if family(p["rate"]) == 44100 else "48"
+    alo, ahi = (p["audio"] + p["blo"], p["audio"] + p["bhi"]) if p["side"] > 0 else (p["audio"] - p["bhi"], p["audio"] - p["blo"])
+    s = ["PLAN %.6f MHz: clock line %.6f MHz (%s of the %s kHz family clock; %s), %s, audio %.1f-%.1f kHz, output %d Hz"
+         % (p["rf"] / 1e6, p["line"] / 1e6, "fundamental" if p["n"] == 1 else _nth(p["n"]) + " harmonic", fam, p["src"],
+            "upper image" if p["side"] > 0 else "lower image (audio spectrum inverted, so the RF is upright)", alo / 1e3, ahi / 1e3, p["rate"])]
+    if p["dist"] > 0.5:
+        s.append("  %.6f MHz is %.1f kHz outside the window; the nearest reachable point %.6f MHz is used (within --tol)."
+                 % (p["want"] / 1e6, p["dist"] / 1e3, p["rf"] / 1e6))
+    s.append("  Expected accuracy: +-%.0f Hz (%s). Signal %.6f .. %.6f MHz; the inverted mirror is at %.6f MHz."
+             % (p["acc"], "%.1f ppm, %s" % (p["unc_ppm"], "uncalibrated: assumes the crystal is within %g ppm, run -calibrate" % UNCAL_PPM
+                                         if p["src"].startswith("model") else p["src"]),
+                (p["rf"] + p["blo"]) / 1e6, (p["rf"] + p["bhi"]) / 1e6, (2 * p["line"] - p["rf"]) / 1e6))
+    if p["n"] > 1 and not p["measured"]:
+        s.append("  Harmonics are weaker than the fundamental and this one is not measured on this machine: check it with -calibrate.")
+    if p["rate"] != 96000 and not p["measured"]:
+        s.append("  %d Hz is modelled (clock %.4f MHz, window %.1f-%.1f kHz), not measured: -calibrate checks it." % (p["rate"], nominal_clock(p["rate"]) / 1e6, p["win"][0] / 1e3, p["win"][1] / 1e3))
+    return s
+
+
+def unreachable_text(f, cands, tol):
+    s = ["%.6f MHz cannot be reached within %.0f kHz. Coverage exists only in windows next to the clock lines (see --coverage)." % (f / 1e6, tol / 1e3)]
+    below = [c for c in cands if c["hi"] < f]; above = [c for c in cands if c["lo"] > f]
+    for what, c in (("below", max(below, key=lambda c: c["hi"]) if below else None), ("above", min(above, key=lambda c: c["lo"]) if above else None)):
+        if c: s.append("  nearest %s: %.6f MHz (%s image of the %.6f MHz line at %d Hz output, %.1f kHz away)"
+                       % (what, (c["hi"] if what == "below" else c["lo"]) / 1e6, "upper" if c["side"] > 0 else "lower", c["line"] / 1e6, c["rate"],
+                          abs((c["hi"] if what == "below" else c["lo"]) - f) / 1e3))
+    return s
+
+
+def coverage(rates, cal, blo=0.0, bhi=0.0):
+    """Merged reachable RF intervals within TX_RANGE: [(lo, hi, label)]."""
+    iv = []
+    for L in clock_lines(rates, cal):
+        wlo, whi = L["win"]
+        for side in (1, -1):
+            lo, hi = (L["line"] + wlo - blo, L["line"] + whi - bhi) if side > 0 else (L["line"] - whi - blo, L["line"] - wlo - bhi)
+            if hi >= lo and hi >= TX_RANGE[0] and lo <= TX_RANGE[1]: iv.append((lo, hi, L))
+    iv.sort(key=lambda t: t[0]); out = []
+    for lo, hi, L in iv:
+        lab = "%.4f MHz %s" % (L["line"] / 1e6, "n=%d" % L["n"])
+        if out and lo <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], hi), out[-1][2] if lab in out[-1][2] else out[-1][2] + ", " + lab, out[-1][3] | {L["rate"]})
+        else: out.append((lo, hi, lab, {L["rate"]}))
+    return out
+
+
+def print_coverage(rates, cal):
+    cov = coverage(rates, cal)
+    print("Reachable RF (any narrow signal) between %.0f and %.0f MHz with rates %s:" % (TX_RANGE[0] / 1e6, TX_RANGE[1] / 1e6, ", ".join(str(r) for r in rates)))
+    tot = 0.0
+    for lo, hi, lab, rs in cov:
+        tot += hi - lo
+        print("  %10.6f .. %10.6f MHz  %6.1f kHz  line %s  rates %s" % (lo / 1e6, hi / 1e6, (hi - lo) / 1e3, lab, "/".join(str(r // 100 / 10.0).rstrip("0").rstrip(".") for r in sorted(rs))))
+    print("Total %.0f kHz = %.1f %% of %.0f-%.0f MHz. Everything else cannot be reached: the jack only radiates next to its clock lines."
+          % (tot / 1e3, 100 * tot / (TX_RANGE[1] - TX_RANGE[0]), TX_RANGE[0] / 1e6, TX_RANGE[1] / 1e6))
+    print("Harmonics and rates other than 96 kHz are modelled until -calibrate measures them.")
+
+
+# ---------------- calibration store ----------------
+def cal_path(args):
+    p = _opt(args, "--cal")
+    if p: return os.path.expanduser(p)
+    local = os.path.join(HERE, "jacktx-calibration.json")
+    return local if os.path.exists(local) else os.path.join(os.path.expanduser("~"), ".jacktx", "calibration.json")
+
+
+def device_id(args):
+    if "--cal-device" in args: return _opt(args, "--cal-device")
+    import platform
+    if MAC:
+        try: return "mac-" + subprocess.run(["sysctl", "-n", "hw.model"], stdout=subprocess.PIPE, text=True, check=True).stdout.strip()
+        except Exception: pass
+    return "%s-%s%s" % (sys.platform, platform.node() or "pc", ("-" + _opt(args, "--device")) if "--device" in args else "")
+
+
+def cal_load(path):
+    if not os.path.exists(path): return {"version": 1, "devices": {}}
+    try:
+        with open(path) as f: d = json.load(f)
+        if not isinstance(d.get("devices"), dict): raise ValueError("no devices")
+        return d
+    except (ValueError, OSError) as e: sys.exit("calibration store %s is unreadable (%s): fix or delete it" % (path, e))
+
+
+def cal_save(path, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".tmp", "w") as f: json.dump(data, f, indent=1, sort_keys=True)
+    os.replace(path + ".tmp", path)
+
+
+# ---------------- small DSP kit (numpy or plain Python) ----------------
+def _fft_py(a):
+    n = len(a); a = list(a); j = 0
+    for i in range(1, n):
+        bit = n >> 1
+        while j & bit: j ^= bit; bit >>= 1
+        j |= bit
+        if i < j: a[i], a[j] = a[j], a[i]
+    m = 2
+    while m <= n:
+        h = m >> 1; tw = [cmath.exp(-2j * math.pi * k / m) for k in range(h)]
+        for s in range(0, n, m):
+            for k in range(h):
+                u = a[s + k]; t = tw[k] * a[s + k + h]
+                a[s + k] = u + t; a[s + k + h] = u - t
+        m <<= 1
+    return a
+
+
+def psd(z, nfft, max_segs=32):
+    """Averaged power spectrum (Hann), centred: bin i is frequency (i - nfft/2) * rate / nfft. z complex or real."""
+    nseg = len(z) // nfft
+    if nseg < 1: raise ValueError("need at least %d samples for the spectrum, got %d" % (nfft, len(z)))
+    pick = list(range(nseg)) if nseg <= max_segs else [k * nseg // max_segs for k in range(max_segs)]
+    if np is not None:
+        z = np.asarray(z); w = np.hanning(nfft)
+        p = np.mean([np.abs(np.fft.fft(z[k * nfft:(k + 1) * nfft] * w)) ** 2 for k in pick], axis=0)
+        return list(np.fft.fftshift(p))
+    w = [0.5 - 0.5 * math.cos(2 * math.pi * i / nfft) for i in range(nfft)]; acc = [0.0] * nfft
+    for k in pick:
+        X = _fft_py([v * c for v, c in zip(z[k * nfft:(k + 1) * nfft], w)])
+        for i, v in enumerate(X): acc[i] += v.real * v.real + v.imag * v.imag
+    h = nfft // 2
+    return [v / len(pick) for v in acc[h:] + acc[:h]]
+
+
+def _pow2_floor(n, cap):
+    k = 1
+    while k * 2 <= min(n, cap): k *= 2
+    return k
+
+
+def _peak_interp(p, i):
+    if 0 < i < len(p) - 1:
+        a, b, c = (10 * math.log10(max(p[j], 1e-30)) for j in (i - 1, i, i + 1))
+        d = a - 2 * b + c
+        if d < 0: return i + 0.5 * (a - c) / d
+    return float(i)
+
+
+def _median(v): s = sorted(v); return s[len(s) // 2]
+
+
+def occupied_band(p, rate, real=False, frac=0.99):
+    """(lo, hi) Hz holding `frac` of the power above the noise floor, from a centred psd(); real=True uses positive frequencies."""
+    n = len(p); b = rate / n; i0 = n // 2 if real else 0
+    floor = _median(p[i0:]); q = [max(0.0, v - 2 * floor) for v in p[i0:]]
+    tot = sum(q)
+    if tot <= 0.5 * sum(p[i0:]): return ((0.0 if real else -rate / 2), rate / 2)    # noise-like: no clear narrow signal, all of it
+    c = 0.0; lo = hi = None
+    for k, v in enumerate(q):
+        c += v
+        if lo is None and c >= (1 - frac) / 2 * tot: lo = k
+        if hi is None and c >= (1 + frac) / 2 * tot: hi = k; break
+    f = lambda k: (k + i0 - n // 2) * b
+    return f(max(0, lo - 2)), f(min(len(q) - 1, (hi if hi is not None else len(q) - 1) + 2))
+
+
+def lowpass_taps(cut, rate, n):
+    m = (n - 1) / 2.0; h = []
+    for i in range(n):
+        x = i - m
+        s = 2 * cut / rate if x == 0 else math.sin(2 * math.pi * cut / rate * x) / (math.pi * x)
+        h.append(s * (0.42 - 0.5 * math.cos(2 * math.pi * i / (n - 1)) + 0.08 * math.cos(4 * math.pi * i / (n - 1))))
+    g = sum(h); return [v / g for v in h]
+
+
+def fir(x, taps, decim=1):
+    """FIR filter (+ decimation), 'valid' part only. Works on real or complex sequences."""
+    L = len(taps)
+    if np is not None:
+        return np.convolve(np.asarray(x), np.asarray(taps), "valid")[::decim]
+    x = list(x); t = list(reversed(taps))
+    return [sum(map(operator.mul, t, x[j:j + L])) for j in range(0, len(x) - L + 1, decim)]
+
+
+class Decimator:
+    """Streaming: mix `shift` Hz down to 0, boxcar-average d1 samples, then a Blackman FIR and keep every d2-th sample."""
+    def __init__(self, rate, shift, d1, d2, ntaps=121):
+        self.rate, self.shift, self.d1, self.d2 = rate, shift, d1, d2
+        self.mid = rate / d1; self.out_rate = self.mid / d2; self.n = 0
+        self.taps = lowpass_taps(0.42 * self.out_rate, self.mid, ntaps) if d2 > 1 else None
+        self.left = None; self.hist = [] if np is None else np.zeros(0, complex)
+        self.rot = 1 + 0j; self.step = cmath.exp(-2j * math.pi * shift / rate); self.acc = 0j; self.cnt = 0
+
+    def push(self, I, Q, off=0.0, scale=1.0):
+        if np is not None:
+            z = (np.asarray(I, float) - off + 1j * (np.asarray(Q, float) - off)) * scale
+            k = np.arange(self.n, self.n + len(z)); self.n += len(z)
+            z = z * np.exp(-2j * np.pi * ((self.shift / self.rate * k) % 1.0))
+            if self.left is not None: z = np.concatenate([self.left, z])
+            m = len(z) // self.d1 * self.d1; self.left = z[m:]
+            s1 = z[:m].reshape(-1, self.d1).mean(axis=1) if self.d1 > 1 else z[:m]
+            if self.taps is None: return s1
+            h = np.concatenate([self.hist, s1]); L = len(self.taps)
+            if len(h) < L: self.hist = h; return np.zeros(0, complex)
+            cnt = (len(h) - L) // self.d2 + 1
+            y = np.convolve(h[:(cnt - 1) * self.d2 + L], self.taps, "valid")[::self.d2]
+            self.hist = h[cnt * self.d2:]; return y
+        out = []; acc, cnt, rot, step, d1 = self.acc, self.cnt, self.rot, self.step, self.d1
+        for i, q in zip(I, Q):
+            acc += complex(i - off, q - off) * rot; rot *= step; cnt += 1
+            if cnt == d1: out.append(acc * (scale / d1)); acc = 0j; cnt = 0
+        self.acc, self.cnt, self.rot = acc, cnt, rot / abs(rot)
+        if self.taps is None: return out
+        h = self.hist + out; L = len(self.taps); t = self.taps; y = []
+        j = 0
+        while j + L <= len(h):
+            y.append(sum(map(operator.mul, t, h[j:j + L]))); j += self.d2
+        self.hist = h[j:]; return y
+
+
+def _split_decim(rate, out=48000.0, mid_min=200e3):
+    D = max(1, int(round(rate / out)))
+    for d2 in range(2, min(D, 16) + 1):
+        if D % d2 == 0 and rate * d2 / D >= mid_min: return D // d2, d2
+    return (1, D) if D > 1 else (1, 1)
+
+
+# ---------------- WAV and IQ input ----------------
+def read_wav(path):
+    """PCM 8/16/24/32-bit or IEEE float 32/64-bit WAV (also WAVE_FORMAT_EXTENSIBLE): (rate, [channels as float]). Clear errors otherwise."""
+    if not os.path.isfile(path): sys.exit("WAV file not found: %s" % path)
+    with open(path, "rb") as f: d = f.read()
+    if len(d) < 12 or d[:4] not in (b"RIFF", b"RF64") or d[8:12] != b"WAVE": sys.exit("%s is not a WAV file (no RIFF/WAVE header)" % path)
+    pos = 12; fmt = data = None
+    while pos + 8 <= len(d) and (fmt is None or data is None):
+        cid = d[pos:pos + 4]; size = struct.unpack("<I", d[pos + 4:pos + 8])[0]
+        if cid == b"data" and (size == 0xFFFFFFFF or pos + 8 + size > len(d)): size = len(d) - pos - 8   # RF64 / truncated writer
+        if cid == b"fmt ": fmt = d[pos + 8:pos + 8 + size]
+        elif cid == b"data": data = d[pos + 8:pos + 8 + size]
+        pos += 8 + size + (size & 1)
+    if fmt is None or len(fmt) < 16 or data is None: sys.exit("%s: WAV without a fmt or data chunk" % path)
+    tag, ch, rate, _, align, bits = struct.unpack("<HHIIHH", fmt[:16])
+    if tag == 0xFFFE and len(fmt) >= 26: tag = struct.unpack("<H", fmt[24:26])[0]
+    width = bits // 8
+    if ch < 1 or rate < 1 or width < 1 or align != ch * width: sys.exit("%s: inconsistent WAV header (%d ch, %d bit, align %d)" % (path, ch, bits, align))
+    kinds = {(1, 1): "B", (1, 2): "h", (1, 4): "i", (3, 4): "f", (3, 8): "d"}
+    if (tag, width) not in kinds and (tag, width) != (1, 3):
+        sys.exit("%s: unsupported WAV encoding (format %d, %d bit); use PCM 8/16/24/32 or float 32/64" % (path, tag, bits))
+    data = data[:len(data) // align * align]
+    if np is not None:
+        if (tag, width) == (1, 3):
+            b = np.frombuffer(data, np.uint8).reshape(-1, 3).astype(np.int32)
+            v = ((b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)) ^ 0x800000) - 0x800000; x = v / 8388608.0
+        else:
+            x = np.frombuffer(data, {"B": np.uint8, "h": "<i2", "i": "<i4", "f": "<f4", "d": "<f8"}[kinds[(tag, width)]]).astype(float)
+            x = {"B": (x - 128) / 128, "h": x / 32768, "i": x / 2147483648.0}.get(kinds[(tag, width)], x)
+        return rate, [x[c::ch] for c in range(ch)]
+    if (tag, width) == (1, 3):
+        x = array.array("f", [(int.from_bytes(data[i:i + 3], "little", signed=True)) / 8388608.0 for i in range(0, len(data), 3)])
+    else:
+        a = array.array(kinds[(tag, width)]); a.frombytes(data)
+        if sys.byteorder == "big" and a.itemsize > 1: a.byteswap()
+        g = {"B": 1 / 128.0, "h": 1 / 32768.0, "i": 1 / 2147483648.0}.get(a.typecode)
+        x = a if g is None else array.array("f", [((v - 128) if a.typecode == "B" else v) * g for v in a])
+        if a.typecode in "fd": x = array.array("f", a)
+    return rate, [x[c::ch] for c in range(ch)]
+
+
+def write_wav_mono(path, x, rate, level_db=-1.0):
+    x = _f32(x); pk = max(1e-9, max(abs(v) for v in x)) if len(x) else 1.0; g = 10 ** (level_db / 20) / pk * 32767
+    with wave.open(path + ".tmp", "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(round(rate))); w.writeframes(array.array("h", [int(v * g) for v in x]).tobytes())
+    os.replace(path + ".tmp", path)
+
+
+_IQ_EXT = {".cu8": "cu8", ".cs8": "cs8", ".cs16": "cs16", ".cf32": "cf32", ".fc32": "cf32", ".iq": "cf32", ".raw": "cf32"}
+_IQ_BPS = {"cu8": 2, "cs8": 2, "cs16": 4, "cf32": 8}
+_SIGMF = {"cf32_le": "cf32", "ci16_le": "cs16", "cu8": "cu8", "ci8": "cs8"}
+
+
+def iq_source(path, fmt=None, rate=None, center=None):
+    """Describe a complex baseband recording: dict(path, fmt, rate, center Hz or None). Exits with a clear message on bad input."""
+    path = os.path.expanduser(path); low = path.lower(); note = None
+    if low.endswith(".sigmf-data") or low.endswith(".sigmf-meta") or low.endswith(".sigmf"):
+        base = path[:path.rfind(".")]; meta, data = base + ".sigmf-meta", base + ".sigmf-data"
+        if not os.path.isfile(meta) or not os.path.isfile(data): sys.exit("SigMF needs both %s and %s" % (meta, data))
+        try:
+            with open(meta) as f: m = json.load(f)
+            g = m["global"]
+        except (ValueError, KeyError, OSError) as e: sys.exit("%s is not valid SigMF metadata (%s)" % (meta, e))
+        dt = g.get("core:datatype")
+        if dt not in _SIGMF: sys.exit("SigMF datatype %r is not supported: use cf32_le, ci16_le, cu8 or ci8" % dt)
+        fmt = _SIGMF[dt]; rate = rate or g.get("core:sample_rate"); path = data
+        caps = m.get("captures") or [{}]
+        center = center if center is not None else caps[0].get("core:frequency")
+    elif low.endswith(".wav"):
+        r, chans = read_wav(path)
+        if len(chans) != 2: sys.exit("%s has %d channel(s): an IQ WAV needs 2 (I = left, Q = right)" % (path, len(chans)))
+        return {"path": path, "fmt": "wav", "rate": float(rate or r), "center": center, "wav": chans}
+    else:
+        ext = os.path.splitext(low)[1]
+        if not fmt:
+            fmt = _IQ_EXT.get(ext)
+            if ext in (".iq", ".raw"): note = "%s: assuming complex float32 (cf32); pass --iq-format cu8/cs8/cs16 if it is not" % os.path.basename(path)
+        if fmt not in _IQ_BPS:
+            sys.exit("unknown IQ format %r: use .cu8 .cs8 .cs16 .cf32 (.iq = cf32), .sigmf-data (+ .sigmf-meta) or a 2-channel .wav, "
+                     "or name it with --iq-format cu8|cs8|cs16|cf32" % (fmt or ext or os.path.basename(path)))
+    if not os.path.isfile(path): sys.exit("IQ file not found: %s" % path)
+    size = os.path.getsize(path)
+    if size < _IQ_BPS[fmt] * 64: sys.exit("%s is too short (%d bytes)" % (path, size))
+    if size % _IQ_BPS[fmt]: sys.exit("%s: %d bytes is not a whole number of %s samples (%d bytes each): wrong format?" % (path, size, fmt, _IQ_BPS[fmt]))
+    if not rate: sys.exit("%s has no sample rate: pass it with --iq-rate HZ (--rx-rate HZ for -rx)" % path)
+    if note: print("note: " + note)
+    return {"path": path, "fmt": fmt, "rate": float(rate), "center": center}
+
+
+def iq_chunks(src, chunk=1 << 18):
+    """Yield (I, Q, offset, scale) blocks; I/Q are numpy arrays or array/list sequences."""
+    if src["fmt"] == "wav":
+        I, Q = src["wav"]
+        for k in range(0, len(I), chunk): yield I[k:k + chunk], Q[k:k + chunk], 0.0, 1.0
+        return
+    fmt = src["fmt"]; bps = _IQ_BPS[fmt]
+    off, scale = {"cu8": (127.5, 1 / 127.5), "cs8": (0.0, 1 / 128.0), "cs16": (0.0, 1 / 32768.0), "cf32": (0.0, 1.0)}[fmt]
+    with open(src["path"], "rb") as f:
+        while True:
+            b = f.read(chunk * bps)
+            if len(b) < bps: return
+            b = b[:len(b) // bps * bps]
+            if np is not None:
+                a = np.frombuffer(b, {"cu8": np.uint8, "cs8": np.int8, "cs16": "<i2", "cf32": "<f4"}[fmt])
+            else:
+                a = array.array({"cu8": "B", "cs8": "b", "cs16": "h", "cf32": "f"}[fmt]); a.frombytes(b)
+                if sys.byteorder == "big" and a.itemsize > 1: a.byteswap()
+            yield a[0::2], a[1::2], off, scale
+
+
+def iq_load(src, max_samples=None):
+    """Whole recording as (I, Q) float sequences (numpy arrays, or array('f') without numpy)."""
+    Is, Qs, n = [], [], 0
+    for I, Q, off, sc in iq_chunks(src):
+        if np is not None: Is.append((np.asarray(I, float) - off) * sc); Qs.append((np.asarray(Q, float) - off) * sc)
+        else: Is.append(array.array("f", [(v - off) * sc for v in I])); Qs.append(array.array("f", [(v - off) * sc for v in Q]))
+        n += len(I)
+        if max_samples and n >= max_samples: break
+    if np is not None: return np.concatenate(Is), np.concatenate(Qs)
+    I = array.array("f"); Q = array.array("f")
+    for a in Is: I.extend(a)
+    for a in Qs: Q.extend(a)
+    return I, Q
+
+
+def write_iq(path, z, fmt):
+    """Complex samples (list) to a raw IQ file; used by the self-test and handy for making test recordings."""
+    v = []
+    for c in z: v += [c.real, c.imag]
+    if fmt == "cf32": a = array.array("f", v)
+    elif fmt == "cs16": a = array.array("h", [max(-32768, min(32767, int(round(x * 32767)))) for x in v])
+    elif fmt == "cs8": a = array.array("b", [max(-128, min(127, int(round(x * 127)))) for x in v])
+    elif fmt == "cu8": a = array.array("B", [max(0, min(255, int(round(127.5 + x * 127.5)))) for x in v])
+    else: raise ValueError(fmt)
+    with open(path, "wb") as f: a.tofile(f)
+
+
+# ---------------- moving a rendered signal to its planned audio offset ----------------
+def _ffpipe(x, rate_in, af, rate_out=None, ch=1):
+    cmd = [ffmpeg_path(), "-v", "error", "-f", "f32le", "-ar", str(int(round(rate_in))), "-ac", str(ch), "-i", "-", "-af", af,
+           "-ar", str(int(round(rate_out or rate_in))), "-ac", str(ch), "-f", "f32le", "-"]
+    raw = subprocess.run(cmd, input=_f32(x).tobytes(), stdout=subprocess.PIPE, check=True).stdout
+    a = array.array("f"); a.frombytes(raw[:len(raw) // 4 * 4]); return a
+
+
+def resample_real(x, r_in, r_out):
+    if int(r_in) == int(r_out): return _f32(x)
+    if np is not None:                                      # FFT resampling: exact, and a loop stays seamless
+        x = np.frombuffer(_f32(x), np.float32).astype(float); X = np.fft.rfft(x); n2 = int(round(len(x) * r_out / r_in))
+        Y = np.zeros(n2 // 2 + 1, complex); k = min(len(X), len(Y)) - 1; Y[:k] = X[:k]
+        return _f32(np.fft.irfft(Y, n2) * (n2 / len(x)))
+    return _ffpipe(x, r_in, "aresample=%d" % r_out, r_out)
+
+
+def shift_band(x, rate, a0, a1, side, band=None):
+    """Move the audio around a0 to a1. side=+1 shifts; side=-1 also mirrors it (f -> a1 + a0 - f) for the lower image.
+    band=(lo, hi) relative to a0 limits what is moved (numpy path)."""
+    if np is not None:
+        x = np.frombuffer(_f32(x), np.float32).astype(float); N = len(x); X = np.fft.rfft(x); k = np.arange(len(X))
+        if band:
+            f = k * rate / N; X = np.where((f >= a0 + band[0] - 1500) & (f <= a0 + band[1] + 1500), X, 0)
+        src = k - int(round((a1 - a0) * N / rate)) if side > 0 else int(round((a1 + a0) * N / rate)) - k
+        ok = (src > 0) & (src < len(X)); Y = np.zeros_like(X)
+        Y[ok] = X[src[ok]] if side > 0 else np.conj(X[src[ok]])
+        return _f32(np.fft.irfft(Y, N))
+    x = _f32(x)
+    if side < 0:                                            # (-1)^n moves f to rate/2 - f (mirror), then shift the rest of the way
+        x = array.array("f", x); x[1::2] = array.array("f", [-v for v in x[1::2]]); d = a1 + a0 - rate / 2.0
+    else: d = a1 - a0
+    return _ffpipe(x, rate, "afreqshift=shift=%.3f:level=1" % d)
+
+
+def retarget(x, rate_in, plan, a0, band=None):
+    """Rendered audio (reference at a0, rate_in) -> the plan's output rate, reference at plan['audio'], image plan['side']."""
+    if plan["rate"] != rate_in: x = resample_real(x, rate_in, plan["rate"])
+    if plan["side"] > 0 and abs(plan["audio"] - a0) < 0.01: return _f32(x)
+    return shift_band(x, plan["rate"], a0, plan["audio"], plan["side"], band)
+
+
+def goertzel(x, f, rate):
+    w = 2 * math.cos(2 * math.pi * f / rate); s1 = s2 = 0.0
+    for v in x: s1, s2 = v + w * s1 - s2, s1
+    return (s1 * s1 + s2 * s2 - w * s1 * s2) / max(1, len(x)) ** 2
+
+
+# ---------------- TX: beacon, IQ file, WAV file ----------------
+_TONE_KEY = [1, 1, 0, 1, 0, 0]      # 0.5 s steps: the beacon's on/off pattern, recognised by -rx tone
+
+
+def mode_tone(rate, cache_dir):
+    a0 = MODE_RF["tone"][0]
+    def build():
+        n = int(0.5 * rate); r = int(0.005 * rate); out = array.array("f"); w = 2 * math.pi * a0 / rate; ph = 0
+        for _ in range(10):
+            for b in _TONE_KEY:
+                if not b: out.extend(array.array("f", bytes(4 * n))); ph += n; continue
+                blk = array.array("f", [math.sin(w * (ph + i)) for i in range(n)]); ph += n
+                for i in range(r): g = 0.5 - 0.5 * math.cos(math.pi * i / r); blk[i] *= g; blk[-1 - i] *= g
+                out.extend(blk)
+        return out
+    s = _cached("tone", "v1", build)
+    return {"samples": s, "cycle": None, "phase": 0, "tune": [
+        "Beacon: steady carrier at %s keyed on/off in a 3 s pattern (on 1 s, off 0.5, on 0.5, off 1)" % mhz(a0),
+        "Check it with an SDR: python3 -I jacktx.py -rx tone (same --freq), or CW/USB in any receiver."]}
+
+
+def mode_am_carrier(rate, cache_dir):
+    """AM with its own carrier on an audio subcarrier, for --freq away from a clock line."""
+    a0 = MODE_RF["am"][0]
+    s = _cached("amc", "v1", lambda: am_chain(rate, a0, 7000))
+    return {"samples": s, "cycle": None, "phase": 0, "tune": [
+        "AM at %s, own carrier (the clock line is not close enough to be the carrier), audio to 7 kHz, 14 kHz wide" % mhz(a0),
+        "OnAir: Analog -> AM, bandwidth 14-16 kHz."]}
+
+
+def _measure_band(z, rate, real):
+    n = len(z)
+    if n < 256: sys.exit("the recording is too short (%d samples)" % n)
+    nfft = _pow2_floor(n // 4 if n >= 4096 else n, 8192 if np is not None else 4096)
+    return occupied_band(psd(z if np is not None else list(z), nfft, 64 if np is not None else 16), rate, real=real)
+
+
+def tx_iq(path, args, cal, rates, tol):
+    """--iq FILE: complex baseband -> real audio whose RF copy sits at --freq (the recording's 0 Hz), upright."""
+    src = iq_source(path, _opt(args, "--iq-format"), _opt(args, "--iq-rate", float))
+    I, Q = iq_load(src); R = src["rate"]; n = len(I)
+    secs = n / R
+    if secs > 600: print("note: %.0f s of IQ; rendering takes a while" % secs)
+    if np is not None: z = np.asarray(I) + 1j * np.asarray(Q)
+    else:
+        step = max(1, n // 400000); z = [complex(a, b) for a, b in zip(I[::step], Q[::step])]   # spectrum from a subsample
+        R_meas = R / step
+    if "--iq-band" in args:
+        try: lo, hi = sorted(float(v) * 1e3 for v in _opt(args, "--iq-band").split(","))
+        except ValueError: sys.exit("--iq-band LO,HI in kHz relative to the recording's 0 Hz, e.g. --iq-band -6,6")
+    else:
+        lo, hi = _measure_band(z, R if np is not None else R_meas, False)
+        if np is None and step > 1: print("note: no numpy: bandwidth measured on every %dth sample (aliases are possible)" % step)
+    print("IQ %s: %s, %.0f Hz, %.1f s, occupied %.1f .. %.1f kHz (%.1f kHz wide)" % (os.path.basename(path), src["fmt"], R, secs, lo / 1e3, hi / 1e3, (hi - lo) / 1e3))
+    F = (_opt(args, "--freq", float) or 0) * 1e6 or (default_line(cal) + 24000.0)
+    p, cands = plan_freq(F, lo, hi, tol, rates, cal)
+    wmax = max(L["win"][1] - L["win"][0] for L in clock_lines(rates, cal))
+    if p is None and hi - lo > wmax - 1000:
+        bw = hi - lo; c0 = (lo + hi) / 2; lo, hi = c0 - wmax / 2 + 500, c0 + wmax / 2 - 500
+        print("WARNING: the recording occupies %.1f kHz but the widest window is %.1f kHz: only %.1f .. %.1f kHz of it is sent."
+              % (bw / 1e3, wmax / 1e3, lo / 1e3, hi / 1e3))
+        p, cands = plan_freq(F, lo, hi, tol, rates, cal)
+    if p is None: sys.exit("\n".join(unreachable_text(F, cands, tol)))
+    fs = p["rate"]; c = (lo + hi) / 2
+    # centre the band at 0 Hz first when it would not survive resampling to fs
+    centre = abs(c) + (hi - lo) / 2 > 0.45 * fs
+    if centre:
+        if np is not None: z = z * np.exp(-2j * np.pi * ((c / R * np.arange(n)) % 1.0))
+        else:
+            rot = 1 + 0j; st = cmath.exp(-2j * math.pi * c / R); I2 = array.array("f", I); Q2 = array.array("f", Q)
+            for k in range(n):
+                v = complex(I[k], Q[k]) * rot; I2[k] = v.real; Q2[k] = v.imag; rot *= st
+                if k & 4095 == 0: rot /= abs(rot)
+            I, Q = I2, Q2
+    else: c = 0.0
+    half = max(abs(lo - c), abs(hi - c))
+    if np is not None:                                       # complex FFT resample + exact band limit
+        Z = np.fft.fftshift(np.fft.fft(z)); n2 = int(round(n * fs / R)); f_in = (np.arange(n) - n // 2) * R / n
+        keep = (f_in >= lo - c) & (f_in <= hi - c) & (np.abs(f_in) < 0.49 * fs)
+        Y = np.zeros(n2, complex); f_out = (np.arange(n2) - n2 // 2) * fs / n2
+        idx = np.round(f_in[keep] * n2 / fs).astype(int) + n2 // 2; ok = (idx >= 0) & (idx < n2)
+        Y[idx[ok]] = Z[keep][ok]; zz = np.fft.ifft(np.fft.ifftshift(Y)) * (n2 / n)
+        ac = p["audio"] + p["side"] * c; t = np.arange(n2)
+        lo_ph = np.exp(2j * np.pi * ((ac / fs * t) % 1.0))
+        out = (zz * lo_ph).real if p["side"] > 0 else (np.conj(zz) * lo_ph).real
+        out = _f32(out)
+    else:
+        inter = array.array("f", bytes(8 * n)); inter[0::2] = _f32(I); inter[1::2] = _f32(Q)
+        af = "aresample=%d" % fs + ("," + _lp(int(max(half, 500)), 4) if 2 * half < 0.9 * min(R, fs) else "")
+        y = _ffpipe(inter, R, af, fs, ch=2); zi, zq = y[0::2], y[1::2]
+        ac = p["audio"] + p["side"] * c; rot = 1 + 0j; st = cmath.exp(2j * math.pi * ac / fs); out = array.array("f", bytes(4 * len(zi)))
+        sg = 1.0 if p["side"] > 0 else -1.0
+        for k in range(len(zi)):
+            out[k] = zi[k] * rot.real - sg * zq[k] * rot.imag; rot *= st
+            if k & 4095 == 0: rot /= abs(rot)
+    tune = ["IQ recording %s: its 0 Hz at %.6f MHz, signal %.6f .. %.6f MHz (upright)" % (os.path.basename(path), p["rf"] / 1e6, (p["rf"] + lo) / 1e6, (p["rf"] + hi) / 1e6)]
+    return out, fs, tune, p
+
+
+def tx_wav_asis(path, args, cal, rates, tol):
+    """--wav FILE without a modulation: the audio goes out unchanged; f Hz appears at line +- f. With --freq it is moved (SSB-like)."""
+    r, chans = read_wav(path)
+    x = chans[0] if len(chans) == 1 else (_f32([(a + b) / 2 for a, b in zip(chans[0], chans[1])]) if np is None else (chans[0] + chans[1]) / 2)
+    x = _f32(x)
+    if "--freq" not in args:
+        rate = r if r in (88200, 96000, 176400, 192000) else 96000      # below 88.2 kHz: 96 kHz, the measured jack rate
+        if rate != r: x = resample_real(x, r, rate); print("note: %d Hz resampled to 96000 Hz (audio unchanged)" % r)
+        line = default_line(cal, rate)
+        lo, hi = _measure_band(x, rate, True)
+        tune = ["WAV %s as-is at %d Hz: audio %.1f-%.1f kHz -> RF %.6f .. %.6f MHz (upper) and its inverted mirror %.6f .. %.6f MHz"
+                % (os.path.basename(path), rate, lo / 1e3, hi / 1e3, (line + lo) / 1e6, (line + hi) / 1e6, (line - hi) / 1e6, (line - lo) / 1e6)]
+        if lo < WIN_LO or hi > 0.479 * rate: tune.append("Parts below %.0f Hz or above %.1f kHz are weak or cut by the jack." % (WIN_LO, 0.479 * rate / 1e3))
+        return x, rate, tune, None
+    if r != 96000: x = resample_real(x, r, 96000)
+    lo, hi = _measure_band(x, 96000, True)
+    F = _opt(args, "--freq", float) * 1e6
+    p, cands = plan_freq(F, lo, hi, tol, rates, cal)
+    if p is None: sys.exit("\n".join(unreachable_text(F, cands, tol)))
+    out = retarget(x, 96000, p, 0.0, (lo, hi))
+    return out, p["rate"], ["WAV %s: its 0 Hz at %.6f MHz (like USB), audio %.1f-%.1f kHz -> %.6f .. %.6f MHz"
+                            % (os.path.basename(path), p["rf"] / 1e6, lo / 1e3, hi / 1e3, (p["rf"] + lo) / 1e6, (p["rf"] + hi) / 1e6)], p
+
+
+def default_line(cal, rate=96000, n=1):
+    e = cal.get("%d|%d" % (rate, n))
+    return e["line_hz"] if e and e.get("found") else n * nominal_clock(rate)
+
+
+def jack_rates(exe):
+    try:
+        out = subprocess.run([exe, "rates"], stdout=subprocess.PIPE, text=True, check=True, timeout=10).stdout.split()
+        r = tuple(x for x in ALL_RATES if str(x) in out)
+        return r or None
+    except Exception: return None
+
+
+# ---------------- SDR receive ----------------
+RX_MODES = ("tone", "rtty", "am", "nfm")
+RX_RATE = 2.4e6
+
+
+def sdr_tool(args):
+    want = _opt(args, "--sdr", str, "auto").lower()
+    found = {"rtl": shutil.which("rtl_sdr"), "hackrf": shutil.which("hackrf_transfer")}
+    if want == "auto":
+        for k in ("rtl", "hackrf"):
+            if found[k]: return k, found[k]
+        sys.exit("no SDR tool found: install rtl-sdr (rtl_sdr) or hackrf (hackrf_transfer), or use --from-file FILE")
+    if want not in found: sys.exit("--sdr must be rtl or hackrf")
+    if not found[want]: sys.exit("%s not found on PATH" % ("rtl_sdr" if want == "rtl" else "hackrf_transfer"))
+    return want, found[want]
+
+
+def sdr_capture(args, center, seconds, rate=None, tag="rx"):
+    """Record `seconds` of IQ around `center` Hz with rtl_sdr or hackrf_transfer; returns an iq_source() dict.
+    2.4 Msps with numpy; without it the lowest rate each SDR does well (0.96 / 2 Msps) to keep plain Python bearable."""
+    kind, exe = sdr_tool(args)
+    rate = rate or _opt(args, "--rx-rate", float) or (RX_RATE if np is not None else (0.96e6 if kind == "rtl" else 2e6))
+    n = int(rate * seconds)
+    os.makedirs(CACHE, exist_ok=True)
+    path = os.path.join(CACHE, "%s-capture.%s" % (tag, "cu8" if kind == "rtl" else "cs8"))
+    if kind == "rtl":
+        cmd = [exe, "-f", str(int(round(center))), "-s", str(int(rate)), "-n", str(n)]
+        if "--gain" in args: cmd += ["-g", _opt(args, "--gain")]
+        if "--sdr-ppm" in args: cmd += ["-p", str(int(round(_opt(args, "--sdr-ppm", float))))]
+    else:
+        lna, vga = (_opt(args, "--gain", str, "24,20").split(",") + ["20"])[:2]
+        cmd = [exe, "-r", path, "-f", str(int(round(center))), "-s", str(int(rate)), "-n", str(n), "-l", lna, "-g", vga, "-a", "1" if "--amp" in args else "0"]
+    cmd += (_opt(args, "--sdr-args", str, "").split())
+    if kind == "rtl": cmd.append(path)
+    print("recording %.1f s at %.6f MHz: %s" % (seconds, center / 1e6, " ".join(cmd)))
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) < 1024:
+        sys.exit("SDR recording failed (%s exit %d): %s" % (os.path.basename(exe), r.returncode, (r.stderr or "").strip()[-400:]))
+    src = iq_source(path, "cu8" if kind == "rtl" else "cs8", rate, center)
+    src["sdr"] = kind
+    return src
+
+
+def rx_source(args, target, seconds, offset=250e3, tag="rx"):
+    """IQ from --from-file (with --rx-rate/--rx-center unless the file carries them) or a fresh SDR recording."""
+    f = _opt(args, "--from-file")
+    if f:
+        c = _opt(args, "--rx-center", float)
+        src = iq_source(f, _opt(args, "--rx-format") or _opt(args, "--iq-format"), _opt(args, "--rx-rate", float), c * 1e6 if c else None)
+        if src["center"] is None: sys.exit("%s: pass the recording's centre frequency with --rx-center MHZ" % f)
+        src["sdr"] = "file"; return src
+    return sdr_capture(args, target - offset, seconds, tag=tag)
+
+
+def baseband(src, target, out_rate=48000.0, seconds=None, args=()):
+    """Mix target to 0 Hz and decimate to ~out_rate: (complex samples, exact rate). --sdr-ppm corrects a HackRF/file's LO error."""
+    e = _opt(list(args), "--sdr-ppm", float, 0.0) if src.get("sdr") != "rtl" else 0.0
+    shift = target * (1 + e * 1e-6) - src["center"]
+    if abs(shift) > src["rate"] / 2 - out_rate / 2: sys.exit("%.6f MHz is outside the recording (centre %.6f MHz, %.0f Hz wide)" % (target / 1e6, src["center"] / 1e6, src["rate"]))
+    d1, d2 = _split_decim(src["rate"], out_rate)
+    dec = Decimator(src["rate"], shift, d1, d2)
+    parts = []; nmax = int(seconds * src["rate"]) if seconds else None; n = 0
+    if np is None and src["rate"] > 1e6: print("note: numpy not found; processing %.1f Msps in plain Python is slow (pip install numpy)" % (src["rate"] / 1e6))
+    for I, Q, off, sc in iq_chunks(src):
+        parts.append(dec.push(I, Q, off, sc)); n += len(I)
+        if nmax and n >= nmax: break
+    z = np.concatenate(parts) if np is not None else [v for p in parts for v in p]
+    return z, dec.out_rate
+
+
+def rx_tone(z, rate, search=10e3, exclude=()):
+    """Strongest line within +-search Hz of 0, its SNR, and whether the jacktx beacon keying is there."""
+    nfft = _pow2_floor(len(z) // 2, 16384); p = psd(z, nfft, 64); b = rate / nfft; h = nfft // 2
+    noise = _median(p); best = None
+    for i in range(max(1, h - int(search / b)), min(nfft - 1, h + int(search / b) + 1)):
+        f = (i - h) * b
+        if any(abs(f - x) < 300 for x in exclude): continue
+        if best is None or p[i] > p[best]: best = i
+    if best is None: return None
+    f = (_peak_interp(p, best) - h) * b; snr = 10 * math.log10(max(p[best], 1e-30) / max(noise, 1e-30))
+    blk = int(0.25 * rate); en = []
+    if np is not None:
+        zz = np.asarray(z) * np.exp(-2j * np.pi * ((f / rate * np.arange(len(z))) % 1.0)); m = len(zz) // blk
+        en = list(np.abs(zz[:m * blk].reshape(m, blk).sum(axis=1)) ** 2)
+    else:
+        w = cmath.exp(-2j * math.pi * f / rate); rot = 1 + 0j
+        for k in range(0, len(z) - blk + 1, blk):
+            acc = 0j
+            for v in z[k:k + blk]: acc += v * rot; rot *= w
+            rot /= abs(rot); en.append(abs(acc) ** 2)
+    match = None
+    if len(en) >= 24:
+        db = [10 * math.log10(max(v, 1e-30)) for v in en]; thr = (max(db) + min(db)) / 2
+        bits = [1 if v > thr else 0 for v in db]; pat = [b_ for b_ in _TONE_KEY for _ in (0, 1)]
+        match = max(sum(1 for i, x in enumerate(bits) if x == pat[(i + s) % 12]) for s in range(12)) / len(bits)
+        if max(db) - min(db) < 6: match = 0.0
+    return {"offset": f, "snr": snr, "keying": match}
+
+
+def fsk_centre(z, rate, shift, search=3000.0):
+    """Centre of the strongest tone pair `shift` Hz apart within +-search Hz (both tones must be there): copes with an
+    uncalibrated clock, which moves everything by up to ~1.3 kHz at 25 MHz."""
+    nfft = _pow2_floor(len(z) // 4, 16384); p = psd(z, nfft, 32); b = rate / nfft; h = nfft // 2; k = shift / 2 / b
+    pk = lambda i: max(p[i - 1], p[i], p[i + 1])
+    rng = range(h - int(search / b), h + int(search / b) + 1)
+    best = max(rng, key=lambda i: min(pk(int(round(i - k))), pk(int(round(i + k)))))
+    return (best - h) * b
+
+
+def rx_rtty(z, rate, baud=45.45, shift=170.0, search=3000.0):
+    """Mark/space matched filters (one bit long) around the tone pair found in the spectrum, then UART framing and ITA2."""
+    c = fsk_centre(z, rate, shift, search)
+    if abs(c) > 0.5:
+        if np is not None: z = np.asarray(z) * np.exp(-2j * np.pi * ((c / rate * np.arange(len(z))) % 1.0))
+        else:
+            w = cmath.exp(-2j * math.pi * c / rate); rot = 1 + 0j; zz = []
+            for k, v in enumerate(z):
+                zz.append(v * rot); rot *= w
+                if k & 4095 == 0: rot /= abs(rot)
+            z = zz
+    print("RTTY tones centred %+.1f Hz from the expected frequency" % c)
+    L = int(round(rate / baud)); d = []
+    for f in (shift / 2, -shift / 2):                    # mark is the higher RF
+        if np is not None:
+            x = np.asarray(z) * np.exp(-2j * np.pi * ((f / rate * np.arange(len(z))) % 1.0))
+            c = np.concatenate([[0], np.cumsum(x)]); e = np.abs(c[L:] - c[:-L]); d.append(np.concatenate([np.zeros(L - 1), e]))
+            continue
+        w = cmath.exp(-2j * math.pi * f / rate); rot = 1 + 0j; acc = 0j; buf = [0j] * L; e = []
+        for k, v in enumerate(z):
+            x = v * rot; rot *= w
+            if k & 4095 == 0: rot /= abs(rot)
+            acc += x - buf[k % L]; buf[k % L] = x; e.append(abs(acc))
+        d.append(e)
+    dd = list(d[0] - d[1]) if np is not None else [m - s for m, s in zip(d[0], d[1])]
+    res = [_rtty_uart(dd, rate / baud), _rtty_uart([-v for v in dd], rate / baud)]   # normal, then reversed (mark low)
+    good = lambda t: sum(1 for ch in t if ch.isalnum()) - 3 * t.count("?")
+    return max(res, key=good)
+
+
+def _rtty_uart(d, Lb):
+    inv_l = {v: k for k, v in _RTTY_LTRS.items()}; inv_f = {v: k for k, v in _RTTY_FIGS.items()}
+    out = []; figs = False; i = 1; n = len(d)
+    while i < n - int(8 * Lb):
+        if d[i - 1] >= 0 > d[i]:                       # mark -> space: the start bit's edge, seen half a bit late by the filter
+            t0 = i - Lb / 2
+            at = lambda k: d[min(n - 1, int(t0 + (k + 1) * Lb))]
+            if at(0) < 0 and at(6) > 0:
+                c = sum(1 << k for k in range(5) if at(k + 1) > 0)
+                if c == 31: figs = False
+                elif c == 27: figs = True
+                elif c == 4: out.append(" ")
+                elif c == 2: out.append("\n")
+                elif c not in (0, 8): out.append((inv_f if figs else inv_l).get(c, "?"))
+                i = int(t0 + 7 * Lb); continue
+        i += 1
+    return "".join(out)
+
+
+def rx_am(z, rate):
+    zz = fir(z, lowpass_taps(7000, rate, 101))
+    env = [abs(v) for v in zz] if np is None else np.abs(zz)
+    m = sum(env) / max(1, len(env))
+    return _f32([v - m for v in env]) if np is None else _f32(env - env.mean())
+
+
+def rx_nfm(z, rate, dev=8000.0):
+    zz = fir(z, lowpass_taps(15000, rate, 101))
+    if np is not None: d = np.angle(zz[1:] * np.conj(zz[:-1])) * rate / (2 * np.pi * dev)
+    else: d = [cmath.phase(zz[k] * zz[k - 1].conjugate()) * rate / (2 * math.pi * dev) for k in range(1, len(zz))]
+    return _f32(fir(d, lowpass_taps(6000, rate, 101)))
+
+
+def rx_main(args):
+    i = args.index("-rx"); kind = "tone"
+    if i + 1 < len(args) and args[i + 1].lstrip("-") in RX_MODES: kind = args[i + 1].lstrip("-")
+    elif i + 1 < len(args) and not args[i + 1].startswith("-"): sys.exit("-rx MODE: one of %s" % ", ".join(RX_MODES))
+    cal = cal_load(cal_path(args)).get("devices", {}).get(device_id(args), {}); tol = _opt(args, "--tol", float, 10.0) * 1e3
+    txm = {"tone": "tone", "rtty": "rtty", "am": "am", "nfm": "nfm"}[kind]
+    a0, blo, bhi = MODE_RF[txm]
+    F = _opt(args, "--freq", float)
+    if F is None:
+        line = default_line(cal); F = line + (0.0 if kind == "am" else a0); p = None
+    else:
+        F *= 1e6
+        p, cands = plan_freq(F, blo, bhi, tol, ALL_RATES, cal)
+        line = p["line"] if p else min(clock_lines(ALL_RATES, cal), key=lambda L: abs(L["line"] - F))["line"]
+        if p and kind != "am": F = p["rf"]                 # where the transmitter actually put it (the planner may clamp to the window)
+        if kind == "am":                                  # AM on the clock line itself when --freq is on one
+            nl = min(clock_lines(ALL_RATES, cal), key=lambda L: abs(L["line"] - F))
+            if abs(nl["line"] - F) <= tol: line = nl["line"]
+    centre = F + (2210.0 if kind == "rtty" else 0.0)           # RTTY: --freq is the USB dial, the tones sit 2125/2295 Hz above it
+    secs = _opt(args, "--seconds", float, {"tone": 8.0, "rtty": 30.0, "am": 15.0, "nfm": 15.0}[kind])
+    print("RX %s at %.6f MHz (clock line %.6f MHz)%s" % (kind, centre / 1e6, line / 1e6, "" if np is not None else "; plain Python DSP (no numpy)"))
+    src = rx_source(args, centre, secs)
+    z, rate = baseband(src, centre, 48000.0, secs if _opt(args, "--from-file") is None else _opt(args, "--seconds", float), args)
+    if len(z) < rate * 0.5: sys.exit("too little signal recorded (%d samples at %.0f Hz)" % (len(z), rate))
+    if kind == "tone":
+        r = rx_tone(z, rate, min(tol, 20e3), exclude=(line - centre, 2 * line - 2 * centre))
+        if r is None: print("no line found"); return 1
+        ok = r["snr"] > 10
+        print("strongest line %.6f MHz (%+.1f Hz from %.6f), SNR %.1f dB%s" % ((centre + r["offset"]) / 1e6, r["offset"], centre / 1e6, r["snr"],
+              "" if r["keying"] is None else ", jacktx beacon keying %s (%.0f %% of 0.25 s blocks match)" % ("FOUND" if r["keying"] >= 0.85 else "not found", 100 * r["keying"])))
+        print("RESULT: %s" % ("signal present" if ok else "nothing clear above the noise"))
+        return 0 if ok else 1
+    if kind == "rtty":
+        txt = rx_rtty(z, rate); print("decoded RTTY:\n" + (txt.strip() or "(nothing)")); return 0 if txt.strip() else 1
+    audio = rx_am(z, rate) if kind == "am" else rx_nfm(z, rate)
+    out = os.path.expanduser(_opt(args, "--out") or os.path.join(CACHE, "rx-%s.wav" % kind))
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True); write_wav_mono(out, audio, rate)
+    print("demodulated %s: %.1f s of audio at %.0f Hz -> %s" % (kind.upper(), len(audio) / rate, rate, out)); return 0
+
+
+# ---------------- calibration ----------------
+def cal_offsets(rate):
+    """Audio offsets of the calibration tones, spread over the modelled window of this rate."""
+    top = 0.475 * rate
+    return [int(round(f * rate / 96000.0 / 100.0)) * 100 for f in (3000, 7000, 12000, 18000, 25000, 33000, 40000, 45000) if f * rate / 96000.0 <= top]
+
+
+def cal_pattern(rate, seconds):
+    offs = cal_offsets(rate); g = 0.9 / len(offs); n = int(seconds * rate); ph = [(k * k * 0.618) % 1 * 2 * math.pi for k in range(len(offs))]
+    if np is not None:
+        t = np.arange(n) / rate; return _f32(sum(g * np.sin(2 * np.pi * a * t + p) for a, p in zip(offs, ph)))
+    per = rate // 100                                          # all offsets are multiples of 100 Hz: one 10 ms period repeats
+    blk = array.array("f", [g * sum(math.sin(2 * math.pi * a * i / rate + p) for a, p in zip(offs, ph)) for i in range(per)])
+    reps = n // per + 1; out = blk * reps; return out[:n]
+
+
+def cal_analyse(src, line_nom, n, rate, args=()):
+    """Find the tone pattern around a clock line in a recording: line frequency, ppm, offset scale and the tone SNRs."""
+    offs = cal_offsets(rate); e = _opt(list(args), "--sdr-ppm", float, 0.0) if src.get("sdr") != "rtl" else 0.0
+    d1 = max(1, int(src["rate"] // 220e3)); shift = line_nom * (1 + e * 1e-6) - src["center"]
+    dec = Decimator(src["rate"], shift, d1, 1); parts = []; tot = 0; lim = int(1.2 * src["rate"])
+    for I, Q, off, sc in iq_chunks(src):
+        parts.append(dec.push(I, Q, off, sc)); tot += len(I)
+        if tot >= lim: break
+    z = np.concatenate(parts) if np is not None else [v for p in parts for v in p]
+    fsm = dec.out_rate; nfft = _pow2_floor(len(z) // 3, 32768); p = psd(z, nfft, 16); b = fsm / nfft; h = nfft // 2
+    noise = max(_median(p), 1e-30); lp = [10 * math.log10(max(v, 1e-30) / noise) for v in p]
+    search = 600e-6 * line_nom; best = None
+    for k in sorted({1, n}):
+        span = [a * k for a in offs if a * k + search < fsm / 2 - 2 * b]
+        for cb in range(h - int(search / b), h + int(search / b) + 1):
+            s = 0.0
+            for a in span:
+                for sd in (1, -1):
+                    j = int(round(cb + sd * a / b))
+                    s += max(0.0, min(40.0, max(lp[j - 1], lp[j], lp[j + 1])))
+            if best is None or s > best[0]: best = (s, k, cb)
+    _, k, cb = best; pairs = []; tones = []
+    for a in offs:
+        if a * k + search >= fsm / 2 - 2 * b: continue
+        got = []
+        for sd in (1, -1):
+            j0 = int(round(cb + sd * a * k / b)); j = max(range(j0 - 3, j0 + 4), key=lambda q: p[q])
+            got.append(((_peak_interp(p, j) - h) * b, lp[j]))
+        (fu, su), (fl, sl) = got; tones.append([a, round(min(su, sl), 1)])
+        if su > 10 and sl > 10: pairs.append(((fu + fl) / 2, (fu - fl) / (2 * a)))
+    found = len(pairs) >= 2
+    res = {"found": found, "n": n, "rate": rate, "tones": tones, "date": time.strftime("%Y-%m-%d %H:%M:%S"), "sdr": src.get("sdr", "?")}
+    if found:
+        off = sum(x for x, _ in pairs) / len(pairs); scale = sum(y for _, y in pairs) / len(pairs)
+        spread = max(abs(x - off) for x, _ in pairs)
+        line = line_nom + off
+        good = [a for a, s in tones if s > 10]
+        res.update(line_hz=line, clock_hz=line / n, ppm=(line / (n * nominal_clock(rate) / (1 + PPM * 1e-6)) - 1) * 1e6, scale=scale,
+                   spread_hz=spread, window=[WIN_LO, max(good) if max(good) < offs[-1] else model_window(rate)[1]])
+    return res
+
+
+def calibrate_main(args):
+    sdr_tol = _opt(args, "--sdr-tol", float)
+    path = cal_path(args); store = cal_load(path); dev = device_id(args); entries = store["devices"].setdefault(dev, {})
+    harms = [int(x) for x in _opt(args, "--harmonics", str, "1,2,3,4").split(",")]
+    if _opt(args, "--from-file"):                            # analysis of a recording only: no transmitting
+        rate = _opt(args, "--cal-rate", int, 96000); n = harms[0] if "--harmonics" in args else _opt(args, "--harmonic", int, 1)
+        line_nom = n * nominal_clock(rate)
+        src = rx_source(args, line_nom, 1.2, tag="cal")
+        r = cal_analyse(src, line_nom, n, rate, args); _cal_report(r, line_nom)
+        if r["found"] and "--save" in args:
+            r["unc_ppm"] = (sdr_tol if sdr_tol is not None else 25.0) + 0.5; entries["%d|%d" % (rate, n)] = r; cal_save(path, store); print("saved to", path)
+        return 0 if r["found"] else 1
+    if not MAC and "--cal-rate" not in args:
+        sys.exit("-calibrate here plays the pattern on the default output: set it to a rate and pass that rate with --cal-rate HZ")
+    kind, _ = sdr_tool(args)
+    if sdr_tol is None: sdr_tol = 3.0 if kind == "rtl" else 20.0     # RTL-SDR V4 has a 1 ppm TCXO; a plain HackRF is +-20 ppm
+    exe = _helper() if MAC else None
+    if MAC:
+        name, present, old, vol = device_info(exe)
+        if not present: sys.exit("the headphone jack is not available: plug the cable in")
+        avail = jack_rates(exe) or ALL_RATES
+    else: old = None; avail = (_opt(args, "--cal-rate", int),)
+    rates = [int(x) for x in _opt(args, "--rates", str, ",".join(str(r) for r in (96000, 88200, 192000, 176400, 48000, 44100) if r in avail)).split(",")]
+    per = 1.6; print("calibration on %s with %s: rates %s, harmonics %s. This transmits a tone pattern." % (dev, kind, rates, harms))
+    try:
+        for rate in rates:
+            hs = [n for n in harms if n * nominal_clock(rate) < 30e6]
+            wav = os.path.join(CACHE, "jacktx-cal-%d.wav" % rate)
+            write_wav(wav, cal_pattern(rate, per * len(hs) + 3.0), -1.0, rate)
+            if MAC:
+                now = set_rate(exe, rate)
+                if now != rate: print("  %d Hz: the jack refused it (now %d), skipped" % (rate, now)); continue
+                plan = playback_plan("darwin", wav, exe=exe)
+            else: plan, _d = other_os_setup(args, wav)
+            proc = start_player(plan, wav, loop=False, device=_opt(args, "--device")); time.sleep(1.0)
+            try:
+                for n in hs:
+                    line_nom = n * nominal_clock(rate)
+                    src = sdr_capture(args, line_nom - 300e3, per - 0.2, tag="cal")
+                    r = cal_analyse(src, line_nom, n, rate, args); r["unc_ppm"] = sdr_tol + 0.5
+                    print("  %6d Hz, %s:" % (rate, "fundamental" if n == 1 else _nth(n) + " harmonic"), end=" "); _cal_report(r, line_nom)
+                    entries["%d|%d" % (rate, n)] = r
+            finally:
+                if proc.poll() is None: proc.terminate()
+    finally:
+        if MAC and old: set_rate(exe, old)
+    cal_save(path, store); print("saved %d entries for %s to %s" % (len(entries), dev, path)); return 0
+
+
+def _cal_report(r, line_nom):
+    if not r["found"]: print("no jacktx pattern found near %.6f MHz (best tone SNRs %s)" % (line_nom / 1e6, [s for _, s in r["tones"]])); return
+    print("line %.3f Hz (%+.2f ppm vs %.6f MHz), offset scale %.4f, pair spread %.1f Hz, tones above 10 dB up to %.1f kHz"
+          % (r["line_hz"], r["ppm"], line_nom / 1e6, r["scale"], r["spread_hz"], max([a for a, s in r["tones"] if s > 10] or [0]) / 1e3))
+
+
+
+# ---------------- self-test of the planner, the shifter, IQ/WAV input, receive and calibration (no sound, no SDR) ----------------
+def _leak_iq(audio, arate, line, fc, irate, m=0.3, noise=0.002, seed=1):
+    """Synthetic SDR recording of the jack: (1 + m * audio) on the clock line, i.e. both images, as complex baseband around fc."""
+    n = int(len(audio) * irate / arate); rnd = random.Random(seed); z = []; w = cmath.exp(2j * math.pi * (line - fc) / irate)
+    rot = 0.4 + 0j; pk = max(abs(v) for v in audio) or 1.0; g = m / pk; last = len(audio) - 1
+    for k in range(n):
+        t = k * arate / irate; i = int(t); fr = t - i
+        a = audio[i] * (1 - fr) + audio[min(i + 1, last)] * fr
+        z.append(rot * (1 + g * a) + complex(rnd.gauss(0, noise), rnd.gauss(0, noise))); rot *= w
+        if k & 4095 == 0: rot = 0.4 * rot / abs(rot)
+    return z
+
+
+def selftest_plan_rx():
+    import tempfile, contextlib, io
+    res = []; tmp = tempfile.mkdtemp(prefix="jacktx-st-"); quiet = lambda: contextlib.redirect_stdout(io.StringIO())
+    P = lambda f, b=(-50, 50), cal=None: plan_freq(f * 1e6, b[0], b[1], 10e3, ALL_RATES, cal or {})[0]
+    p = P(6.168); res.append(("plan 6.168 MHz: 96 kHz, fundamental, upper", p and (p["rate"], p["n"], p["side"], round(p["audio"])) == (96000, 1, 1, 24000), p and p["audio"]))
+    p = P(12.3); res.append(("plan 12.3 MHz: 2nd harmonic, 12 kHz", p and (p["n"], p["side"], round(p["audio"])) == (2, 1, 12000), p and p["line"]))
+    p = P(11.3); res.append(("plan 11.3 MHz: 44.1 kHz family", p and family(p["rate"]) == 44100 and round(p["audio"]) == 10400, p and p["rate"]))
+    p = P(6.140); res.append(("plan 6.140 MHz: lower image, 4 kHz", p and (p["side"], round(p["audio"])) == (-1, 4000), p and p["side"]))
+    res.append(("plan 3.5 / 9.0 MHz: unreachable", P(3.5) is None and P(9.0) is None, ""))
+    cal = {"96000|1": {"found": True, "line_hz": 6.144e6 * (1 + 30e-6), "n": 1, "scale": 1.0, "unc_ppm": 3.5, "window": [2000, 40000]}}
+    p = P(6.170, cal=cal); res.append(("plan uses the calibration", p and abs(p["audio"] - (6.170e6 - 6.144e6 * (1 + 30e-6))) < 0.01 and p["src"].startswith("calibrated"), p and p["src"]))
+    p = P(6.1875, cal=cal); res.append(("calibrated window moves to a wider rate", p and p["rate"] != 96000, p and p["rate"]))
+    cal2 = {"96000|2": {"found": False}}
+    res.append(("plan skips a line calibrated as absent", all(L["n"] != 2 or L["rate"] != 96000 for L in clock_lines(ALL_RATES, cal2)), ""))
+    # shifter: up/down/inverted, both rates
+    fs = 96000; x = array.array("f", [math.sin(2 * math.pi * 12000 * i / fs) + 0.5 * math.sin(2 * math.pi * 12170 * i / fs) for i in range(fs)])
+    try:
+        y = shift_band(x, fs, 12000, 30000, 1); g = lambda f: goertzel(y[2000:-2000], f, fs)
+        res.append(("shift +18 kHz (upper image)", g(30000) > 100 * g(12000) and g(30170) > 0.15 * g(30000), "%.1e %.1e" % (g(30000), g(12000))))
+        y = shift_band(x, fs, 12000, 20000, -1); g = lambda f: goertzel(y[2000:-2000], f, fs)
+        res.append(("shift + mirror (lower image)", g(20000) > 3 * g(19830) > 0 and g(19830) > 30 * g(20170), "%.1e %.1e %.1e" % (g(20000), g(19830), g(20170))))
+        y = resample_real(x, fs, 88200); g = lambda f: goertzel(y[2000:-2000], f, 88200)
+        res.append(("resample 96 -> 88.2 kHz keeps 12 kHz", g(12000) > 100 * g(11000), "%d samples" % len(y)))
+    except SystemExit as e: res.append(("shifter (needs numpy or ffmpeg)", False, str(e)))
+    # WAV reader
+    pth = os.path.join(tmp, "f32.wav"); v = [0.5, -0.25, 0.125, -1.0]
+    with open(pth, "wb") as f:
+        d = array.array("f", v).tobytes(); f.write(b"RIFF" + struct.pack("<I", 36 + len(d)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, 2, 48000, 48000 * 8, 8, 32) + b"data" + struct.pack("<I", len(d)) + d)
+    r, ch = read_wav(pth); res.append(("WAV float32 stereo", r == 48000 and [round(a, 3) for a in ch[0]] == [0.5, 0.125] and [round(a, 3) for a in ch[1]] == [-0.25, -1.0], ""))
+    pth = os.path.join(tmp, "p24.wav"); d = b"".join(int(round(a * 8388607)).to_bytes(3, "little", signed=True) for a in v)
+    with open(pth, "wb") as f: f.write(b"RIFF" + struct.pack("<I", 36 + len(d)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 44100, 44100 * 3, 3, 24) + b"data" + struct.pack("<I", len(d)) + d)
+    r, ch = read_wav(pth); res.append(("WAV 24-bit mono", r == 44100 and [round(a, 3) for a in ch[0]] == [0.5, -0.25, 0.125, -1.0], ""))
+    bad = os.path.join(tmp, "bad.wav"); open(bad, "wb").write(b"not a wav file at all")
+    try: read_wav(bad); res.append(("bad WAV refused", False, "accepted"))
+    except SystemExit as e: res.append(("bad WAV refused", "not a WAV" in str(e), str(e)))
+    # IQ formats: a +3 kHz complex tone at 48 kHz
+    irate = 48000; zt = [0.7 * cmath.exp(2j * math.pi * 3000 * k / irate) for k in range(24000)]; ok = []
+    for fmt in ("cu8", "cs8", "cs16", "cf32"):
+        pth = os.path.join(tmp, "t." + fmt); write_iq(pth, zt, fmt); I, Q = iq_load(iq_source(pth, None, irate))
+        c = abs(sum(complex(a, b) * zt[k].conjugate() for k, (a, b) in enumerate(zip(I, Q)))) / sum(abs(v) ** 2 for v in zt)
+        ok.append((fmt, round(c, 3)))
+    write_iq(os.path.join(tmp, "s.sigmf-data"), zt, "cs16")
+    json.dump({"global": {"core:datatype": "ci16_le", "core:sample_rate": irate}, "captures": [{"core:frequency": 6.16e6}]}, open(os.path.join(tmp, "s.sigmf-meta"), "w"))
+    sg = iq_source(os.path.join(tmp, "s.sigmf-data")); ok.append(("sigmf", sg["fmt"] == "cs16" and sg["rate"] == irate and sg["center"] == 6.16e6))
+    res.append(("IQ cu8/cs8/cs16/cf32/SigMF read back", all(c > 0.97 if isinstance(c, float) else c for _, c in ok), str(ok)))
+    try:
+        iq_source(os.path.join(tmp, "t.cf32"), None, None); res.append(("IQ without a rate refused", False, ""))
+    except SystemExit as e: res.append(("IQ without a rate refused", "sample rate" in str(e), ""))
+    try:
+        with quiet(): y, ofs, tune, pl = tx_iq(os.path.join(tmp, "t.cf32"), ["--iq-rate", "48000", "--freq", "6.160"], {}, ALL_RATES, 10e3)
+        g = lambda f: goertzel(y[4000:-4000], f, ofs)
+        res.append(("--iq upper: 0 Hz -> 16 kHz, +3 kHz -> 19 kHz", ofs == 96000 and g(19000) > 100 * g(13000), "%.1e %.1e" % (g(19000), g(13000))))
+        with quiet(): y, ofs, tune, pl = tx_iq(os.path.join(tmp, "t.cf32"), ["--iq-rate", "48000", "--freq", "6.130"], {}, ALL_RATES, 10e3)
+        g = lambda f: goertzel(y[4000:-4000], f, ofs)
+        res.append(("--iq lower: audio inverted, +3 kHz -> 11 kHz", pl["side"] < 0 and g(11000) > 100 * g(17000), "%.1e %.1e" % (g(11000), g(17000))))
+    except SystemExit as e: res.append(("--iq render", False, str(e)))
+    # receive: synthetic recordings of the jack -> -rx code paths
+    line = 6.144e6 * (1 + 20e-6); irate = 192000
+    def rx_file(audio, arate, target, name, secs):
+        zz = _leak_iq(audio, arate, line, target - 40000, irate); pth = os.path.join(tmp, name + ".cu8"); write_iq(pth, zz, "cu8")
+        src = iq_source(pth, None, irate, target - 40000); src["sdr"] = "file"
+        with quiet(): return baseband(src, target, 48000.0)
+    keyed = array.array("f")
+    for b in _TONE_KEY * 3:
+        keyed.extend(array.array("f", [b * math.sin(2 * math.pi * 12000 * i / fs) for i in range(fs // 2)]))
+    z, r = rx_file(keyed, fs, line + 12000, "tone", 6); t = rx_tone(z, r, 10e3, exclude=(-12000, -24000))
+    res.append(("RX tone: frequency, SNR, beacon keying", t and abs(t["offset"]) < 3 and t["snr"] > 20 and (t["keying"] or 0) >= 0.85, t and "%+.2f Hz %.0f dB keying %.2f" % (t["offset"], t["snr"], t["keying"] or 0)))
+    txt = "RYRY CQ DE N0CALL TEST 73"
+    ra = tone_segments(rtty_segments(txt, 12000.0, lead=10, tail=10), fs)
+    z, r = rx_file(ra, fs, line + 12085, "rtty", 0); got = rx_rtty(z, r)
+    res.append(("RX RTTY decode (synthetic capture)", "CQ DE N0CALL TEST 73" in got, repr(got[:40])))
+    am = array.array("f", [(1 + 0.8 * math.sin(2 * math.pi * 1000 * i / fs)) * math.cos(2 * math.pi * 20000 * i / fs) for i in range(2 * fs)])
+    z, r = rx_file(am, fs, line + 20000, "am", 0); a = rx_am(z, r); g = lambda f: goertzel(a[2000:-2000], f, r)
+    res.append(("RX AM: 1 kHz tone back", g(1000) > 50 * g(1700), "%.1e %.1e" % (g(1000), g(1700))))
+    fm = array.array("f", [math.cos(2 * math.pi * 20000 * i / fs + 8.0 * math.sin(2 * math.pi * 1000 * i / fs)) for i in range(2 * fs)])
+    z, r = rx_file(fm, fs, line + 20000, "nfm", 0); a = rx_nfm(z, r); g = lambda f: goertzel(a[2000:-2000], f, r)
+    res.append(("RX NFM: 1 kHz tone back", g(1000) > 50 * g(1700), "%.1e %.1e" % (g(1000), g(1700))))
+    # calibration analysis on a synthetic recording of the 2nd harmonic, +23 ppm, at 480 kHz
+    l2 = 2 * 6.144e6 * (1 + 23e-6); pat = cal_pattern(96000, 1.3)
+    zz = _leak_iq(pat, 96000, l2, l2 - 120e3, 480000, m=0.5, noise=0.01); pth = os.path.join(tmp, "cal.cu8"); write_iq(pth, zz, "cu8")
+    src = iq_source(pth, None, 480000, l2 - 120e3); src["sdr"] = "file"
+    c = cal_analyse(src, 2 * 6.144e6, 2, 96000)
+    res.append(("calibrate: line, ppm, offset scale", c["found"] and abs(c["ppm"] - 23) < 0.3 and abs(c["scale"] - 1) < 0.01,
+                "%+.2f ppm scale %.4f" % (c.get("ppm", 0), c.get("scale", 0)) if c["found"] else str(c["tones"])))
+    shutil.rmtree(tmp, ignore_errors=True)
+    return res
+
+MODES = ["tone", "am", "nfm", "wfm", "usb", "rtty", "sstv", "wefax", "specart", "aprs", "pocsag", "ft8", "wspr", "multi", "noaa", "sonde", "dvbs2", "find"]
+
+
+HELP_ROWS = [
+    ("-tone", "beacon: keyed carrier (check with -rx tone)", "CW 6.156000 MHz"),
+    ("-am", "music, AM (DAC clock is the carrier)", "AM 6.144000 MHz, 14 kHz"),
+    ("-nfm", "music, narrow FM", "NFM 6.168000 MHz, 25 kHz"),
+    ("-wfm", "music, wide FM (weak)", "WFM 6.168000 MHz, 50 kHz"),
+    ("-usb", "music, single sideband", "USB dial 6.156000 MHz"),
+    ("-rtty", "RTTY text 45.45 bd / 170 Hz", "USB dial 6.153875 MHz (OnAir RTTY 6.156)"),
+    ("-sstv", "SSTV colour picture (Martin M1)", "USB dial 6.154000 MHz"),
+    ("-wefax", "weather fax map (120 LPM)", "USB dial 6.154000 MHz"),
+    ("-specart", "ONAIR logo painted on the waterfall", "waterfall 6.163-6.173 MHz"),
+    ("-aprs", "APRS position, map pin", "NFM 6.164000 MHz"),
+    ("-pocsag", "pager message (512 bd)", "POCSAG 6.162500 MHz"),
+    ("-ft8", "FT8 CQ every 15 s", "USB dial 6.154500 MHz"),
+    ("-wspr", "WSPR beacon, even minutes", "USB dial 6.154500 MHz"),
+    ("-multi", "AM + RTTY + APRS at once", "6.180 / 6.152 / 6.164 MHz"),
+    ("-noaa", "NOAA APT weather-satellite image", "NOAA APT 6.168000 MHz"),
+    ("-sonde", "RS41 weather balloon, map", "6.159000 MHz (centre off it)"),
+    ("-dvbs2", "DVB-S2 video, 32 ksym/s", "6.168000 MHz (receiver must accept 32 ksym/s)"),
+    ("-find", "sweep 2-40 kHz, to find the clock line", "scan 1-30 MHz for a line moving with the sweep"),
+]
+
+
+def print_help():
+    print("jacktx: transmit test signals out of the headphone jack (DAC clock 6.144 MHz). Ctrl+C stops.")
+    print("Based on jacktx by Kristijonas Adomaitis - https://github.com/adswill/jacktx (GPL-3.0-or-later)\n")
+    print("usage: python3 -I jacktx.py -<mode> [--freq MHZ] [--audio FILE] [--level -1] [--render-only] [--clock MHZ] [--device NAME]")
+    print("       python3 -I jacktx.py --iq FILE [--iq-rate HZ] [--freq MHZ]      send a complex baseband recording")
+    print("       python3 -I jacktx.py --wav FILE [--freq MHZ]                    send a WAV as-is (or -am/-nfm/-wfm/-usb --wav FILE)")
+    print("       python3 -I jacktx.py --freq MHZ --plan | --coverage             where can it transmit?")
+    print("       python3 -I jacktx.py -rx [tone|rtty|am|nfm] [--freq MHZ] [--sdr rtl|hackrf] [--from-file FILE]")
+    print("       python3 -I jacktx.py -calibrate [--sdr rtl|hackrf]              measure the clock lines with an SDR")
+    print("       python3 -I jacktx.py --selftest")
+    print("The frequencies below are the defaults (6.144 MHz clock, 96 kHz). --freq moves any mode; it is reachable only near clock lines.\n")
+    for f, what, tune in HELP_ROWS: print("  %-10s %-44s %s" % (f, what, tune))
+
+
+def build_tx(mode, args, cal, rates, tol):
+    """Render the chosen signal: (samples, output rate, tune lines, plan or None)."""
+    global RF_BASE, LINE_HZ
+    F = _opt(args, "--freq", float)
+    if F is not None:
+        F *= 1e6
+        if not 0.1e6 <= F <= 30e6: sys.exit("--freq is in MHz: 1 to 25 MHz is the useful range")
+        if not TX_RANGE[0] <= F <= TX_RANGE[1]: print("note: %.3f MHz is outside %g-%g MHz" % (F / 1e6, TX_RANGE[0] / 1e6, TX_RANGE[1] / 1e6))
+    if mode == "iq": return tx_iq(_opt(args, "--iq"), args, cal, rates, tol)
+    if mode == "wav": return tx_wav_asis(os.path.expanduser(_opt(args, "--wav")), args, cal, rates, tol)
+    if F is None:                                          # the defaults, as always: 96 kHz, the clock line at 6.144 MHz (or calibrated)
+        RF_BASE = LINE_HZ = default_line(cal)
+        m = globals()["mode_" + mode](RATE, CACHE)
+        return m["samples"], RATE, m["tune"], None, m
+    if mode == "find": sys.exit("-find sweeps around the clock to locate it; --freq does not apply")
+    if mode == "am":                                       # on a clock line: the line is the carrier (no carrier power spent)
+        for L in sorted(clock_lines(rates, cal), key=lambda L: (abs(L["line"] - F), L["n"], ALL_RATES.index(L["rate"]) if L["rate"] in ALL_RATES else 9)):
+            acc = L["unc_ppm"] * 1e-6 * F
+            if abs(L["line"] - F) + acc <= tol:
+                RF_BASE = LINE_HZ = L["line"]
+                m = mode_am(RATE, CACHE); x = resample_real(m["samples"], RATE, L["rate"]) if L["rate"] != RATE else m["samples"]
+                p = dict(L, side=1, rf=L["line"], dist=abs(L["line"] - F), audio=0.0, acc=acc, want=F, blo=-7000, bhi=7000, margin=0, lo=L["line"], hi=L["line"])
+                return x, L["rate"], m["tune"], p, m
+    a0, blo, bhi = MODE_RF[mode]
+    p, cands = plan_freq(F, blo, bhi, tol, rates, cal)
+    if p is None: sys.exit("\n".join(unreachable_text(F, cands, tol)))
+    RF_BASE = p["rf"] - a0; LINE_HZ = p["line"]
+    m = (mode_am_carrier if mode == "am" else globals()["mode_" + mode])(RATE, CACHE)
+    return retarget(m["samples"], RATE, p, a0, (blo, bhi)), p["rate"], m["tune"], p, m
 
 
 def main():
     args = sys.argv[1:]
     if "--selftest" in args: sys.exit(selftest())
     level = -1.0
-    global SONG
-    if "--audio" in args:
-        SONG = os.path.expanduser(args[args.index("--audio") + 1])
-    if "--level" in args:
-        level = float(args[args.index("--level") + 1])
+    global SONG, CLOCK_HZ, RF_BASE, LINE_HZ, PPM
+    if "--audio" in args: SONG = os.path.expanduser(args[args.index("--audio") + 1])
+    if "--level" in args: level = float(args[args.index("--level") + 1])
     if level > 0: sys.exit("level above 0 dBFS refused")
-    global CLOCK_HZ
     if "--clock" in args:
         try: CLOCK_HZ = float(args[args.index("--clock") + 1]) * 1e6
         except (IndexError, ValueError): sys.exit("--clock needs a number in MHz, e.g. --clock 12.288")
         if not 0.1e6 <= CLOCK_HZ <= 100e6: sys.exit("--clock MHZ out of range")
+    PPM = _opt(args, "--ppm", float, 0.0)
+    if abs(PPM) > 1000: sys.exit("--ppm is a small correction (a few to a few hundred ppm)")
+    RF_BASE = LINE_HZ = CLOCK_HZ * (1 + PPM * 1e-6)
+    tol = _opt(args, "--tol", float, 10.0) * 1e3
+    if "-rx" in args: sys.exit(rx_main(args))
+    if "-calibrate" in args: sys.exit(calibrate_main(args))
+    store = cal_load(cal_path(args)); cal = {} if "--clock" in args else store.get("devices", {}).get(device_id(args), {})
+    exe = _helper() if MAC and "--render-only" not in args and "--plan" not in args and "--coverage" not in args else None
+    rates = (jack_rates(exe) if exe else None) or ALL_RATES
+    if _opt(args, "--rates"): rates = tuple(int(r) for r in _opt(args, "--rates").split(","))
+    if "--coverage" in args: print_coverage(rates, cal); return
     mode = next((a[1:] for a in args if a.startswith("-") and not a.startswith("--") and a[1:] in MODES), None)
-    if not mode:
-        help_rows = [
-            ("-am", "music, AM (DAC clock is the carrier)", "AM 6.144000 MHz, 14 kHz"),
-            ("-nfm", "music, narrow FM", "NFM 6.168000 MHz, 25 kHz"),
-            ("-wfm", "music, wide FM (weak)", "WFM 6.168000 MHz, 50 kHz"),
-            ("-usb", "music, single sideband", "USB dial 6.156000 MHz"),
-            ("-rtty", "RTTY text 45.45 bd / 170 Hz", "USB dial 6.153875 MHz (OnAir RTTY 6.156)"),
-            ("-sstv", "SSTV colour picture (Martin M1)", "USB dial 6.154000 MHz"),
-            ("-wefax", "weather fax map (120 LPM)", "USB dial 6.154000 MHz"),
-            ("-specart", "ONAIR logo painted on the waterfall", "waterfall 6.163-6.173 MHz"),
-            ("-aprs", "APRS position, map pin", "NFM 6.164000 MHz"),
-            ("-pocsag", "pager message (512 bd)", "POCSAG 6.162500 MHz"),
-            ("-ft8", "FT8 CQ every 15 s", "USB dial 6.154500 MHz"),
-            ("-wspr", "WSPR beacon, even minutes", "USB dial 6.154500 MHz"),
-            ("-multi", "AM + RTTY + APRS at once", "6.180 / 6.152 / 6.164 MHz"),
-            ("-noaa", "NOAA APT weather-satellite image", "NOAA APT 6.168000 MHz"),
-            ("-sonde", "RS41 weather balloon, map", "6.159000 MHz (centre off it)"),
-            ("-dvbs2", "DVB-S2 video, 32 ksym/s", "6.168000 MHz (receiver must accept 32 ksym/s)"),
-            ("-find", "sweep 2-40 kHz, to find the clock line", "scan 1-30 MHz for a line moving with the sweep"),
-        ]
-        print("jacktx: transmit test signals out of the headphone jack (DAC clock 6.144 MHz). Ctrl+C stops.")
-        print("Based on jacktx by Kristijonas Adomaitis - https://github.com/adswill/jacktx (GPL-3.0-or-later)\n")
-        print("usage: python3 -I jacktx.py -<mode> [--audio FILE] [--level -1] [--render-only] [--clock MHZ] [--device NAME]")
-        print("       python3 -I jacktx.py --selftest")
-        print("The frequencies below assume the 6.144 MHz clock of Apple silicon MacBooks; on other chips use -find, then --clock MHZ.\n")
-        for f, what, tune in help_rows: print("  %-10s %-40s %s" % (f, what, tune))
-        sys.exit(2)
+    if "--wav" in args:
+        w = os.path.expanduser(_opt(args, "--wav")); read_wav(w)          # validates the file
+        if mode in ("am", "nfm", "wfm", "usb"): SONG = w
+        elif mode: sys.exit("--wav goes with -am, -nfm, -wfm or -usb (or alone, to send the file as-is)")
+        else: mode = "wav"
+    if "--iq" in args:
+        if mode: sys.exit("--iq sends the recording itself: leave out the -%s mode" % mode)
+        mode = "iq"
+    if "--plan" in args:
+        F = _opt(args, "--freq", float)
+        if F is None: sys.exit("--plan needs --freq MHZ")
+        a0, blo, bhi = MODE_RF.get(mode, (0, -50, 50))
+        p, cands = plan_freq(F * 1e6, blo, bhi, tol, rates, cal)
+        print("\n".join(describe_plan(p) if p else unreachable_text(F * 1e6, cands, tol))); sys.exit(0 if p else 1)
+    if not mode: print_help(); sys.exit(2)
     t0 = time.time()
-    m = globals()["mode_" + mode](RATE, CACHE)
+    samples, out_rate, tune, plan, *rest = build_tx(mode, args, cal, rates, tol)
+    m = rest[0] if rest else {"cycle": None, "phase": 0}
     wav = os.path.join(CACHE, "jacktx-%s.wav" % mode)
-    os.makedirs(CACHE, exist_ok=True); write_wav(wav, m["samples"], level)
-    print("rendered -%s: %.1f s loop in %.1f s -> %s" % (mode, len(m["samples"]) / RATE, time.time() - t0, wav))
-    if not MAC and "--clock" not in args and mode != "find":
+    os.makedirs(CACHE, exist_ok=True); write_wav(wav, samples, level, out_rate)
+    print("rendered -%s: %.1f s at %d Hz in %.1f s -> %s" % (mode, len(samples) / out_rate, out_rate, time.time() - t0, wav))
+    if plan: print("\n".join(describe_plan(plan)))
+    if not MAC and "--clock" not in args and mode != "find" and not cal:
         print("note: the clock frequency is chip-specific. 6.144 MHz is the Apple silicon value and is only a guess here; "
-              "run -find to locate the line, then use --clock MHZ.")
-    print("TUNE (RF = %.3f MHz DAC clock + audio frequency; the mirror below the clock is inverted, ignore it):" % (CLOCK_HZ / 1e6))
-    for line in m["tune"]: print("  " + line)
+              "run -find to locate the line, then use --clock MHZ (or -calibrate with an SDR).")
+    print("TUNE (clock line %.6f MHz; the mirror on the other side of the line is inverted, ignore it):" % (LINE_HZ / 1e6))
+    for line in tune: print("  " + line)
     if "--render-only" in args: return
     if MAC:
-        exe = _helper(); device = None
+        device = None
         name, present, old, vol = device_info(exe)
         if not present:
             sys.exit("the headphone jack is not available: plug the cable in (the system output can stay on the speakers).")
         if vol < 0.99:
             print("note: the headphone jack's own volume is %d %%; set it to 100 %% for the strongest signal "
                   "(select External Headphones once in Sound settings, turn it up, then switch back to the speakers)." % round(vol * 100))
-        now = set_rate(exe, RATE) if old != RATE else old
-        if now != RATE:
-            sys.exit("could not set %s to %d Hz (now %d)" % (name, RATE, now))
+        now = set_rate(exe, out_rate) if old != out_rate else old
+        if now != out_rate:
+            if old != now: set_rate(exe, old)
+            sys.exit("could not set %s to %d Hz (now %d); try --rates 96000" % (name, out_rate, now))
         print("output: the headphone jack directly, at %d Hz (was %d); the system output stays as it is. Ctrl+C to stop." % (now, old))
     else:
-        plan, device = other_os_setup(args, wav); old = RATE; exe = None
+        plan_, device = other_os_setup(args, wav); old = out_rate
         print("Ctrl+C to stop.")
     proc = [None]
     def stop(*_): raise KeyboardInterrupt
@@ -2213,8 +3349,8 @@ def main():
                 if start - t > 2: print("waiting %.0f s for the next %d s slot" % (start - t, c))
                 while time.time() < start - 0.02: time.sleep(min(0.2, max(0.0, start - time.time() - 0.02)))
                 print(time.strftime("%H:%M:%S", time.gmtime()), "UTC  transmitting")
-            if MAC: plan = playback_plan("darwin", wav, exe=exe)
-            proc[0] = start_player(plan, wav, loop=not m["cycle"] and plan[0] == "winsound", device=device)
+            play = playback_plan("darwin", wav, exe=exe) if MAC else plan_
+            proc[0] = start_player(play, wav, loop=not m["cycle"] and play[0] == "winsound", device=device)
             proc[0].wait()
     except KeyboardInterrupt:
         print("\nstopping")
@@ -2223,7 +3359,7 @@ def main():
             proc[0].terminate()
             try: proc[0].wait(2)
             except Exception: proc[0].kill()
-        if old != RATE:
+        if old != out_rate:
             try: print("restored output rate to %d Hz" % set_rate(exe, old))
             except Exception as e: print("could not restore the output rate:", e)
 
