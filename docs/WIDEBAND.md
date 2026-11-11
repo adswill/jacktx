@@ -82,6 +82,23 @@ counting both sides. The copy at 407 to 484 kHz reads at 91 % at 3.8 bit/s. In t
 (k = 1) had 5 errors while k = 9 had none: a narrow interferer near 18.39 MHz is the likely cause (not checked).
 The picture `wideband-proof.png` shows the spectrum with the tone on and off.
 
+## 3b. A sweep across 900 kHz
+
+`lab/sweep900.py` steps one emission across 900 kHz in 10 kHz steps (91 steps of 1 s) around 73.728 MHz, where three
+neighbouring teeth (73.216, 73.728, 74.240 MHz) are all strong. For each step it picks the nearest tooth and the smallest
+odd k with k x f equal to the distance (f between 15 and 45 kHz, k up to 7), so the chosen copy lands on the step.
+The HackRF capture (2 Msps, centre 73.95 MHz) is then checked at every step: the strongest 1.25 Hz bin within 40 Hz of
+the expected frequency, against the same measurement 400 Hz to the side.
+
+- Detected at **91 of 91 steps**. Signal +17.6 to +43 dB over the mean noise; the control stays below +8.6 dB for 95 %
+  of the steps (one control point reached +16.9 dB, a spur).
+- By copy: k = 1 median +41 dB, k = 3 +33 dB, k = 5 +27 dB, k = 7 +23 dB.
+- Picture: `sweep900-proof.png`; numbers: `sweep900.csv`.
+
+This shows a controlled, narrow emission can be placed anywhere in a 900 kHz span. It is a stepped tone, not a filled
+block: with frequency-hopping audio (a filled block) the floor rose by less than 0.5 dB at this antenna distance, which
+is within the drift between two captures.
+
 ## 4. What this is and what it is not
 
 - It is a real, deterministic, data-bearing emission about 1 MHz wide per tooth, made with nothing but audio samples.
