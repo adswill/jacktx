@@ -134,3 +134,19 @@ cache/jackaudio play zck.wav
 lab/bin/labdsp psd --rate 2e6 --nfft 32768 --seg 0.016384 --in zck.cs8 --out zck.sg
 python3 lab/zck.py rx zck.sg "JACKTX WIDE 1 MHZ"
 ```
+
+## Aux input as a receiver (2026-11-11, lab notes)
+
+Set-up: 4-pole plug, 5.6 kOhm across microphone and ground so the Mac offers the input, a red LED from the antenna joint to ground,
+1.5 kOhm from that joint to the microphone wire, 75 cm of wire as the antenna. The LED is a square-law detector; the Mac records at 96 kHz.
+
+- A HackRF test carrier beside the wire (AM, 6666.67 Hz tone) is received. It is radio, not USB noise: switching the HackRF's output
+  amplifier (radio power only) moves the tone from +11..18 dB to +35 dB over the noise in 1 Hz.
+- Response by frequency at the same transmit setting (dB over noise in 1 Hz): 1.9 MHz 17, 3.65 MHz 19, 7.1 MHz 24, 14.25 MHz 34,
+  21.3 MHz 7, 28.2 MHz 32-38, 50.3 MHz 36-38, 145.3 MHz 19, 433.3 MHz 16, 1296 MHz 14.
+- Analogue AM voice at that level is about 12 dB under the noise: detectable by correlation (57 x noise), not audible.
+- `lab/auxlink.swift`: 16-tone FSK on the AM envelope, K=7 rate-1/2 code, interleaver, CRC32. At 100 bit/s it carried 1659 bytes of
+  Codec 2 voice (9.5 s of speech) in 138 s with the checksum correct, at 30 dB-Hz and 6 % raw symbol errors.
+- No FM broadcast station is received: cross-correlating the aux recording with seven stations demodulated by the HackRF at the same moment
+  gives chance values, while a station hidden 50 dB under the noise is found (`lab/xcorr.swift`). The detector has no tuning: it hears
+  all frequencies at once, so there is no spectrum to sweep. FM needs a faster diode and a tuned circuit.
