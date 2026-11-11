@@ -317,7 +317,7 @@ def cmd_aux(args):
             wav = os.path.join(outdir, "aux-fm-%.1f-%d.wav" % (mhz, rate))
             r2 = subprocess.run([helper("auxfm"), raw, str(rate), str(off), wav], capture_output=True, text=True)
             for ln in r2.stdout.splitlines(): print("      " + ln)
-            print("      a pilot lock above about 0.5 means the station really is in the recording; listen to " + wav)
+            print("      a pilot lock above about 0.3 means the station really is in the recording (a real station gave 0.54, noise 0.10); listen to " + wav)
         if not folds: print("   no known FM station folds into the audio band at this rate")
     return 0
 
