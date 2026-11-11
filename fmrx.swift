@@ -3,7 +3,7 @@
 // fmrx: broadcast FM receiver for one station already mixed to 0 Hz (complex float32, about 250 kHz).
 //   fmrx IN.cf32 RATE OUT.wav [--deemph US]
 // Prints: level and quality, the 19 kHz stereo pilot, and RDS (PI, PS name, radio text, PTY) with block statistics.
-// The audio is mono (L+R), 15 kHz low-pass, de-emphasis (50 us default), written as a 16-bit WAV.
+// The audio is stereo when the station has a pilot (mono otherwise), 15 kHz low-pass, de-emphasis (50 us default), 16-bit WAV.
 import Accelerate
 import Foundation
 
@@ -40,20 +40,38 @@ let pil = tone(19000), ref = (tone(17500) + tone(20500) + tone(16800) + tone(212
 let pilDb = 10 * log10(pil / ref + 1e-20)
 print(String(format: "pilot 19 kHz: %.1f dB over the neighbouring multiplex (%@)", pilDb, pilDb > 15 ? "stereo station" : "no pilot: mono or too weak"))
 
-// ---- audio: 15 kHz low-pass, decimate to about 50 kHz, de-emphasis ----
+// ---- audio: mono (L+R) and, with a pilot, stereo (L-R on the 38 kHz subcarrier, locked to twice the pilot phase) ----
 let D1 = max(1, Int((fs / 50000).rounded())); let ars = fs / Double(D1)
-var audio = decim(mpx, lowpass(129, 15000, fs), D1)
-let a = Float(exp(-1 / (ars * deUs * 1e-6))); var st: Float = 0
-for k in 0..<audio.count { st = a * st + (1 - a) * audio[k]; audio[k] = st }
-var mean: Float = 0; vDSP_meanv(audio, 1, &mean, vDSP_Length(audio.count)); var pk: Float = 1e-9
-for k in 0..<audio.count { audio[k] -= mean; pk = max(pk, abs(audio[k])) }
+let hA = lowpass(129, 15000, fs)
+var M = decim(mpx, hA, D1)
+var S = [Float](); var stereo = false
+if pilDb > 15 {
+    // pilot phase: one-pole low-pass of the multiplex mixed with 19 kHz (about 30 Hz wide)
+    let w19 = 2 * Double.pi * 19000 / fs; let al = 1 - exp(-2 * Double.pi * 30 / fs); var pr = 0.0, pq = 0.0
+    var sI = [Float](repeating: 0, count: n), sQ = sI
+    for k in 0..<n { let ph = w19 * Double(k); let x = Double(mpx[k]); pr += al * (x * cos(ph) - pr); pq += al * (-x * sin(ph) - pq)
+        let th = atan2(pq, pr); let c = 2 * (ph + th); sI[k] = Float(-2 * x * sin(c)); sQ[k] = Float(2 * x * cos(c)) }
+    let SI = decim(sI, hA, D1), SQ = decim(sQ, hA, D1)
+    var pI: Float = 0, pQ: Float = 0; let skip = min(SI.count, Int(ars / 4))   // let the pilot filter settle
+    if SI.count > skip + 100 { vDSP_svesq(Array(SI[skip...]), 1, &pI, vDSP_Length(SI.count - skip)); vDSP_svesq(Array(SQ[skip...]), 1, &pQ, vDSP_Length(SQ.count - skip)) }
+    var pM: Float = 0; vDSP_svesq(M, 1, &pM, vDSP_Length(M.count))
+    print(String(format: "stereo: difference signal %.1f dB below the sum, %.1f dB above its quadrature (a correct lock gives well above 0)", 10 * log10(pM / max(pI, 1e-20)), 10 * log10(pI / max(pQ, 1e-20))))
+    S = SI; stereo = true
+}
+let a = Float(exp(-1 / (ars * deUs * 1e-6)))
+func deemph(_ x: inout [Float]) { var st: Float = 0; for k in 0..<x.count { st = a * st + (1 - a) * x[k]; x[k] = st }
+    var mean: Float = 0; vDSP_meanv(x, 1, &mean, vDSP_Length(x.count)); for k in 0..<x.count { x[k] -= mean } }
+var Lc = M, Rc = M
+if stereo { for k in 0..<min(M.count, S.count) { Lc[k] = (M[k] + S[k]) / 2; Rc[k] = (M[k] - S[k]) / 2 } }
+deemph(&Lc); deemph(&Rc)
+var pk: Float = 1e-9; for k in 0..<Lc.count { pk = max(pk, abs(Lc[k]), abs(Rc[k])) }
+let chans = stereo ? 2 : 1
 var wav = Data(); func le<T: FixedWidthInteger>(_ v: T) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
-wav.append("RIFF".data(using: .ascii)!); le(UInt32(36 + audio.count * 2)); wav.append("WAVEfmt ".data(using: .ascii)!); le(UInt32(16)); le(UInt16(1)); le(UInt16(1))
-le(UInt32(ars)); le(UInt32(ars) * 2); le(UInt16(2)); le(UInt16(16)); wav.append("data".data(using: .ascii)!); le(UInt32(audio.count * 2))
-for v in audio { le(Int16(max(-32767, min(32767, v / pk * 0.8 * 32767)))) }
+wav.append("RIFF".data(using: .ascii)!); le(UInt32(36 + Lc.count * 2 * chans)); wav.append("WAVEfmt ".data(using: .ascii)!); le(UInt32(16)); le(UInt16(1)); le(UInt16(chans))
+le(UInt32(ars)); le(UInt32(ars) * UInt32(2 * chans)); le(UInt16(2 * chans)); le(UInt16(16)); wav.append("data".data(using: .ascii)!); le(UInt32(Lc.count * 2 * chans))
+for k in 0..<Lc.count { le(Int16(max(-32767, min(32767, Lc[k] / pk * 0.8 * 32767)))); if stereo { le(Int16(max(-32767, min(32767, Rc[k] / pk * 0.8 * 32767)))) } }
 FileManager.default.createFile(atPath: A[3], contents: wav)
-// audio quality: power in 300-3000 Hz against 15.5-18 kHz of the multiplex (empty in a clean signal)
-print(String(format: "audio: %.0f Hz mono WAV, %.1f s -> %@", ars, Double(audio.count) / ars, A[3]))
+print(String(format: "audio: %.0f Hz %@ WAV, %.1f s -> %@", ars, stereo ? "stereo" : "mono", Double(Lc.count) / ars, A[3]))
 
 // ---- RDS: 57 kHz subcarrier, 1187.5 bit/s biphase ----
 var bi = [Float](repeating: 0, count: n), bq = bi
