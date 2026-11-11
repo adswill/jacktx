@@ -6,6 +6,7 @@
   python3 -I jackrx.py fm 93.9                 one broadcast FM station: audio to a WAV, stereo pilot, RDS name and text
   python3 -I jackrx.py sweep                   the whole FM band (87.5-108 MHz): spectrum, every station, RDS of the strongest
   python3 -I jackrx.py sweep --band 60-80      any band: spectrum and the strongest signals (no FM decoding outside 87.5-108)
+  python3 -I jackrx.py auxloop                 self-test: the jack plays tones while its own input records them
   python3 -I jackrx.py aux                     the headphone jack as an input (only when the Mac offers one): spectrum up to
                                                48 kHz, VLF stations, and FM stations that fold into the audio band
 
@@ -323,6 +324,40 @@ def cmd_aux(args):
 
 
 
+def cmd_auxloop(args):
+    """Self-test: the jack plays a tone while the jack's own input records. Two things can show up in the recording:
+    the tone itself (plain audio leaking from the output wires to the mic wire) and, if the input's fast sampler folds
+    radio frequencies into the audio band, nothing new at this frequency (the 6.144 MHz line folds to 0 Hz and its audio
+    sidebands fold back onto the tone). The two are told apart by level against frequency: audio leakage through the
+    cable grows with frequency, a folded line does not, and by the phase jumps of the tone when the plug is moved."""
+    exe = helper("auxin"); jack = os.path.join(CACHE, "jackaudio")
+    devs = [l.split("\t") for l in subprocess.run([exe, "list"], capture_output=True, text=True).stdout.splitlines() if l]
+    uid = opt(args, "--uid") or next((d[0] for d in devs if d[3] == "1"), None)
+    if not uid: print(AUX_HELP); return 1
+    if not os.path.exists(jack): die("run jacktx.py once first (it builds the playback helper)")
+    import wave
+    rate = int(opt(args, "--rate", 96000)); outdir = opt(args, "--outdir", os.getcwd())
+    print("tone Hz : level in the recording (dB over the floor) : level with the output silent")
+    for tone in (1000, 5000, 10000, 20000, 30000, 40000):
+        res = []
+        for amp in (0.89, 0.0):
+            wav = os.path.join(outdir, "loop.wav"); n = int(rate * 4.0); a = array.array("h", bytes(4 * n))
+            for i in range(n):
+                v = int(amp * 32767 * math.sin(2 * math.pi * tone * i / rate)); a[2 * i] = v; a[2 * i + 1] = v
+            w = wave.open(wav, "wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate); w.writeframes(a.tobytes()); w.close()
+            subprocess.run([jack, "set", str(rate)], capture_output=True)
+            pl = subprocess.Popen([jack, "play", wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import time; time.sleep(1.0)
+            raw = os.path.join(outdir, "loop.f32"); subprocess.run([exe, "rec", uid, str(rate), "2", raw], capture_output=True); pl.wait()
+            x = array.array("f"); x.frombytes(open(raw, "rb").read())
+            if not x or max(abs(v) for v in x) == 0: res.append(None); continue
+            db = aux_spectrum(x); nb = len(db); k = int(tone / (rate / 2) * nb); floor = sorted(db)[nb // 2]
+            res.append(max(db[max(0, k - 3):k + 4]) - floor)
+        print("%7d : %s : %s" % (tone, "silence" if res[0] is None else "%+.1f" % res[0], "silence" if res[1] is None else "%+.1f" % res[1]))
+    return 0
+
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -330,6 +365,7 @@ def main():
     if args[0] in ("fm", "wfm", "rds"): return cmd_fm(args)
     if args[0] == "sweep": return cmd_sweep(args)
     if args[0] == "aux": return cmd_aux(args)
+    if args[0] == "auxloop": return cmd_auxloop(args)
     die("unknown command %r (fm, sweep, aux)" % args[0])
 
 
