@@ -127,7 +127,22 @@ python3 -I jackrx.py aux              # the headphone jack as an input, when the
 
 The same commands work as `python3 -I jacktx.py -rx fm 93.9` and `-rx sweep`. Tested on real broadcasts with a HackRF Pro: the sweep lists about 40 signals and decodes the RDS of about 25 stations.
 
-`aux` only works when the plug has a microphone contact (a 4-pole plug or a headset splitter). A plain 3-pole aux cable gives no input: the command says so and explains what to try. With an input it records at each rate, shows the spectrum up to 48 kHz, names known VLF transmitters and checks for FM stations that fold into the audio band. That path is untested until such a plug is available.
+`aux` only works when the Mac offers an input on the jack, which needs a 4-pole plug with about 5.6 kOhm between its microphone and ground wires. With an input it records at each rate, shows the spectrum up to 48 kHz, names known VLF transmitters and checks for FM stations that fold into the audio band.
+
+## The jack as a receiver
+
+With a red LED and two resistors on a cut-open 4-pole cable, the jack's input becomes a simple radio receiver (a detector with no tuning). What was measured, the wiring and the limits are in [docs/AUXRX.md](docs/AUXRX.md).
+
+```bash
+python3 -I jackrx.py auxwatch                  # shows when the Mac offers the input while you try the resistor
+python3 -I jackrx.py auxview                   # live spectrum and waterfall of the jack's input, in the browser
+python3 -I jackrx.py auxlink --text "hello"    # a HackRF sends data on an AM carrier, the jack's input receives and decodes it
+python3 -I jackrx.py jacklink --text "hello"   # the other way: the jack sends, the HackRF receives (simulated only so far)
+```
+
+- It receives a nearby AM transmitter from about 2 MHz to 1.3 GHz, best at 14 to 50 MHz.
+- Plain AM voice is too weak to hear, but error-corrected data works: 1659 bytes of compressed speech arrived with every bit right at 100 bit/s.
+- It does not receive broadcast FM or any distant station. That was tested, not assumed; the document says how.
 
 ## Wide signals
 
@@ -152,13 +167,3 @@ Requirements: Python 3 and ffmpeg on PATH. Playback uses `winsound` from the sta
 GPL-3.0-or-later ([LICENSE](LICENSE)) with one attribution term ([ADDITIONAL-TERMS.md](ADDITIONAL-TERMS.md)): keep the notices and credit jacktx in anything you build from it.
 
 Algorithms and tables used, with credit: WSJT-X by K1JT et al. (FT8, WSPR; GPL-3), ft8_lib by Kārlis Goba (MIT), RS41 framing after rs1729 by Zilog80 (GPL-3), DVB-S2 tables from ETSI EN 302 307.
-
-### Live view of the jack's input
-
-```
-python3 -I jackrx.py auxview
-```
-
-Opens a page with the live spectrum (top) and waterfall (bottom) of the headphone jack's input, 0 to 48 kHz. It needs the Mac to
-offer the input (a 4-pole plug with about 5.6 kOhm between the microphone contact and ground, see `auxwatch`). Drag to zoom,
-double-click for the full span, "Save picture" writes a PNG. The built-in microphone is never opened.

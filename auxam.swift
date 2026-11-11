@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Kristijonas Adomaitis. Part of jacktx - https://github.com/adswill/jacktx
 // auxam IN.f32 RATE OUT.wav [LO HI]: clean an aux recording for listening: band LO..HI Hz (default 300..3400), narrow lines (hum, USB tones) removed, 16 kHz 16-bit wav
 import Foundation
 import Accelerate

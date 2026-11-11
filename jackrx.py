@@ -10,6 +10,11 @@
   python3 -I jackrx.py auxloop                 self-test: the jack plays tones while its own input records them
   python3 -I jackrx.py aux                     the headphone jack as an input (only when the Mac offers one): spectrum up to
                                                48 kHz, VLF stations, and FM stations that fold into the audio band
+  python3 -I jackrx.py auxlink --text "hi"     data link HackRF -> jack input: the HackRF sends, the jack's input receives and decodes
+                                               (--file F to send a file, --wav F to send a sound as plain AM, --freq MHZ, --gain N,
+                                               --amp 0|1, --t 5|10|20|40 ms per symbol; --no-tx only listens and decodes)
+  python3 -I jackrx.py jacklink --text "hi"    data link jack -> HackRF: the jack plays the frame, the HackRF receives beside one of
+                                               the jack's radio lines (--line MHZ, default 18.432; --t as above)
   python3 -I jackrx.py auxview                 live spectrum and waterfall of the jack's input in the browser
                                                (--rate 96000, --nfft 4096, --fps 15, --port 8770, --no-open)
 
@@ -232,13 +237,14 @@ VLF = [(16.4, "JXN Norway"), (17.2, "SAQ Sweden"), (18.1, "RDL Russia"), (18.2, 
        (40.0, "JJY Japan"), (45.9, "NSY Italy"), (60.0, "MSF UK / WWVB / JJY"), (68.5, "BPC China"), (77.5, "DCF77 Germany")]
 
 AUX_HELP = """The Mac offers no input on the headphone jack right now.
-It only creates one when the plug has a microphone contact with a microphone-like load on it (about 1-2 kOhm to ground).
+It only creates one when the plug has a microphone contact with a microphone-like load on it.
 A plain 3-pole aux plug shorts that contact to ground inside the socket, so nothing at the free end can change it.
-What works:
-  1. a 4-pole (3 black rings) cable: 1-2 kOhm between the sleeve and the ring next to it on the free end; the wire goes on the sleeve
+What works (measured on a MacBook Pro, codec CS42L84):
+  1. a 4-pole (3 black rings) cable: plug it in first, then put about 5.6 kOhm between the microphone wire and the ground wire.
+     1.5 kOhm is too low (the codec logs it as a fault) and 4.5 kOhm is not accepted either. Once the input shows, it stays until
+     the plug is pulled, even if the resistor is removed.
   2. a headset splitter (mic + headphones to one 4-pole plug) with a microphone, or that resistor, in its mic socket
-  3. experiment: pull a 3-pole plug out by one notch (about 3 mm) and put the resistor between ring and sleeve of the free end
-Run this command again after each try: it shows at once whether the input appeared."""
+`jackrx.py auxwatch` shows live what the codec decides; docs/AUXRX.md has the whole build."""
 
 
 def _fft(re, im):
@@ -394,6 +400,87 @@ def cmd_auxwatch(args):
     return 0
 
 
+def _link_payload(args, tmp):
+    """The frame's payload: 'T' + text, or 'F' + file name + NUL + file bytes."""
+    path = os.path.join(tmp, "payload.bin")
+    if opt(args, "--file"):
+        f = opt(args, "--file"); data = b"F" + os.path.basename(f).encode() + b"\0" + open(f, "rb").read()
+    else:
+        data = b"T" + (opt(args, "--text") or "jacktx test").encode()
+    if len(data) > 65535: die("the link carries 65535 bytes at most")
+    open(path, "wb").write(data); return path
+
+
+def _link_show(path, outdir):
+    d = open(path, "rb").read()
+    if d[:1] == b"T": print("received text: " + d[1:].decode("utf-8", "replace"))
+    elif d[:1] == b"F" and b"\0" in d:
+        name, body = d[1:].split(b"\0", 1); out = os.path.join(outdir, "rx-" + os.path.basename(name.decode("utf-8", "replace")))
+        open(out, "wb").write(body); print("received file: %s (%d bytes)" % (out, len(body)))
+    else: print("received %d bytes of unknown kind" % len(d))
+
+
+def _jack_uid():
+    devs = [l.split("\t") for l in subprocess.run([helper("auxin"), "list"], capture_output=True, text=True).stdout.splitlines() if l]
+    jack = [d for d in devs if d[3] == "1"]
+    if not jack: print(AUX_HELP); sys.exit(1)
+    return jack[0][0]
+
+
+def cmd_auxlink(args):
+    """HackRF -> the jack's input. The HackRF sends an AM carrier whose envelope carries the frame (or a sound); the detector on the
+    cable turns it into audio; the jack's input records it."""
+    link, tms = helper("auxlink"), opt(args, "--t", "20")
+    mhz, gain, amp = float(opt(args, "--freq", 28.234)), opt(args, "--gain", "30"), opt(args, "--amp", "1")
+    uid = _jack_uid()
+    with tempfile.TemporaryDirectory() as tmp:
+        cs8, rec, wav = os.path.join(tmp, "tx.cs8"), os.path.join(tmp, "rx.f32"), opt(args, "--wav")
+        if wav: info = subprocess.run([link, "txam", wav, cs8], capture_output=True, text=True).stdout
+        else: info = subprocess.run([link, "tx", _link_payload(args, tmp), cs8, tms], capture_output=True, text=True).stdout
+        print(info.strip())
+        secs = os.path.getsize(cs8) / 4e6
+        tx = None
+        if "--no-tx" not in args:
+            if not shutil.which("hackrf_transfer"): die("hackrf_transfer not found (brew install hackrf)")
+            print("HackRF sends on %.3f MHz for %.0f s (gain %s, amplifier %s). Transmit only where you are allowed to." % (mhz, secs, gain, amp))
+            tx = subprocess.Popen(["hackrf_transfer", "-t", cs8, "-f", str(int(mhz * 1e6 - 100e3)), "-s", "2000000", "-x", gain, "-a", amp],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([helper("auxin"), "rec", uid, "96000", "%.1f" % (secs + 4), rec], capture_output=True)
+        if tx: tx.terminate(); tx.wait()
+        if wav:
+            out = opt(args, "--out", os.path.join(os.getcwd(), "aux-received.wav"))
+            print(subprocess.run([helper("auxam"), rec, "96000", out], capture_output=True, text=True).stdout.strip()); print("sound written to " + out)
+            return 0
+        got = os.path.join(tmp, "rx.bin")
+        r = subprocess.run([link, "rx", rec, got, tms], capture_output=True, text=True).stdout
+        print(r.strip())
+        if "RESULT ok" in r: _link_show(got, os.getcwd()); return 0
+        return 1
+
+
+def cmd_jacklink(args):
+    """The jack -> HackRF. The jack plays the frame's tones; they appear beside each of the jack's radio lines; the HackRF records
+    one line and the tones are decoded."""
+    link, tms, line = helper("auxlink"), opt(args, "--t", "20"), float(opt(args, "--line", 18.432)) * 1e6
+    with tempfile.TemporaryDirectory() as tmp:
+        wav, cs8, aud, got = os.path.join(tmp, "tx.wav"), os.path.join(tmp, "rx.cs8"), os.path.join(tmp, "rx.f32"), os.path.join(tmp, "rx.bin")
+        print(subprocess.run([link, "txwav", _link_payload(args, tmp), wav, tms], capture_output=True, text=True).stdout.strip())
+        import wave
+        w = wave.open(wav); secs = w.getnframes() / w.getframerate(); w.close()
+        play = subprocess.Popen([helper("jackaudio"), "play", wav], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+        subprocess.run(["hackrf_transfer", "-r", cs8, "-f", str(int(line - 250e3)), "-s", "2000000", "-n", str(int(2e6 * (secs + 2))),
+                        "-l", opt(args, "--lna", "32"), "-g", opt(args, "--vga", "32"), "-a", opt(args, "--amp", "0")], capture_output=True)
+        play.wait()
+        if not os.path.exists(cs8) or os.path.getsize(cs8) < 100000: die("the HackRF gave no samples. Is it plugged in and not open in another program?")
+        print(subprocess.run([link, "iq2aud", cs8, "2000000", "250000", aud, tms], capture_output=True, text=True).stdout.strip())
+        r = subprocess.run([link, "rx", aud, got, tms, "100000"], capture_output=True, text=True).stdout
+        print(r.strip())
+        if "RESULT ok" in r: _link_show(got, os.getcwd()); return 0
+        print("No frame. The jack's lines need an antenna: a long cable on the headphone contacts, close to the HackRF's antenna.")
+        return 1
+
+
 def cmd_auxview(args):
     """Live spectrum and waterfall of the jack's input: auxspec writes dB frames, this serves them to a page on 127.0.0.1."""
     import struct, threading, collections
@@ -469,6 +556,8 @@ def main():
     if args[0] == "auxloop": return cmd_auxloop(args)
     if args[0] == "auxwatch": return cmd_auxwatch(args)
     if args[0] == "auxview": return cmd_auxview(args)
+    if args[0] == "auxlink": return cmd_auxlink(args)
+    if args[0] == "jacklink": return cmd_jacklink(args)
     die("unknown command %r (fm, sweep, aux)" % args[0])
 
 
