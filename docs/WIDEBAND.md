@@ -53,10 +53,22 @@ capture, each copy alone:
 | k = 7 | 259 / 308 kHz | 45 (26 %) |
 | k >= 9 | beyond 333 kHz | not readable at this distance |
 
-So the message is recovered without error from signal energy that lies entirely more than 100 kHz from the tooth, and
-mostly recovered from energy beyond 185 kHz. Farther copies exist (section 2) but are below the noise at this antenna
-distance for a 15 bit/s signal. A slower second run (7.6 bit/s) was not better, so something other than plain noise
-(drift, dropped samples in the capture) limits it; not investigated.
+So the message is recovered without error from signal energy that lies entirely more than 100 kHz from the tooth.
+
+With coherent detection (`zck.py rxc`, one matched integration per symbol; same antenna position, a second capture):
+
+| copies used | bit errors of 176 |
+|---|---|
+| k = 5 alone (185 / 220 kHz) | 3 (1.7 %) |
+| k = 7 alone (259 / 308 kHz) | 7 (4.0 %) |
+| only beyond 111 kHz (k >= 3) | 0 |
+| only beyond 185 kHz (k >= 5) | 2 (1.1 %) |
+| only beyond 259 kHz (k >= 7) | 8 (4.5 %) |
+| only beyond 333 kHz (k >= 9) | 31 (18 %) |
+
+So at this antenna distance the message is readable (95 % of bits, no error correction) from energy that lies entirely
+beyond 259 kHz on the lower side of the tooth: a decodable signal more than 600 kHz wide counting both sides. A slower
+non-coherent run (7.6 bit/s) was not better than the 15 bit/s one; the cause was not investigated.
 
 ## 4. What this is and what it is not
 

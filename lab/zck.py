@@ -8,6 +8,7 @@ separately for each harmonic, to show how far from the line the information can 
 
   zck.py tx OUT.wav "TEXT"            audio for the jack (96 kHz)
   zck.py rx SPECTROGRAM.f32 "TEXT"    decode; the spectrogram is labdsp psd --rate 2e6 --nfft 32768 --seg 0.016384
+  zck.py rxc CAPTURE.cs8 "TEXT"       coherent decode from the capture itself (needs lab/bin/zckrx; about 6 dB better)
 """
 import array, math, sys, wave
 import os
@@ -77,7 +78,47 @@ def rx(sg, text):
     for kmin in (3, 5, 7, 9):
         report("only beyond %3.0f kHz (k >= %d)" % (kmin * F0 / 1e3, kmin), [(k, -1) for k in ks if k >= kmin])
 
+def rxc(cs8, text, sg=None):
+    """Coherent decode straight from the capture (2 Msps, centre 18.7 MHz) with lab/bin/zckrx."""
+    import os, subprocess, tempfile
+    here = os.path.dirname(os.path.abspath(__file__)); bits = bits_of(text)
+    # the line frequency: a coarse FFT-free search with zckrx over +-150 Hz around the nominal line
+    tmp = tempfile.mkdtemp(prefix="zck"); o = os.path.join(tmp, "o.cf32")
+    cand = [LINE - CENTER + d for d in range(-150, 151, 5)]
+    subprocess.run([os.path.join(here, "bin", "zckrx"), cs8, str(SR), str(1 << 17), o] + ["%.3f" % c for c in cand], check=True, capture_output=True)
+    a = array.array("f"); a.frombytes(open(o, "rb").read()); nf = len(cand); rows = len(a) // (2 * nf)
+    pw = [sum(a[2 * (r * nf + j)] ** 2 + a[2 * (r * nf + j) + 1] ** 2 for r in range(rows)) for j in range(nf)]
+    fc = CENTER + cand[pw.index(max(pw))]; ppm = (fc - LINE) / LINE
+    print("line at %.6f MHz (%+.1f ppm)" % (fc / 1e6, ppm * 1e6))
+    ks = [1, 3, 5, 7, 9, 11]; CH = 8; chunk = int(round(SYM * SR / CH))
+    fl = []
+    for k in ks:
+        for f in (F0, F1): fl.append(fc - k * f * (1 + ppm) - CENTER)
+    subprocess.run([os.path.join(here, "bin", "zckrx"), cs8, str(SR), str(chunk), o] + ["%.3f" % f for f in fl], check=True, capture_output=True)
+    a = array.array("f"); a.frombytes(open(o, "rb").read()); nf = len(fl); rows = len(a) // (2 * nf)
+    def energy(j, c0):   # coherent sum of one symbol (CH chunks) for frequency j
+        re = sum(a[2 * ((c0 + c) * nf + j)] for c in range(CH)); im = sum(a[2 * ((c0 + c) * nf + j) + 1] for c in range(CH)); return re * re + im * im
+    noise = []
+    for j in range(nf):
+        v = sorted(energy(j, c0) for c0 in range(0, rows - CH, CH)); noise.append(v[len(v) // 4] / 0.29 + 1e-9)   # lower quartile -> mean of the noise
+    def soft(ki, c0): return energy(2 * ki + 1, c0) / noise[2 * ki + 1] - energy(2 * ki, c0) / noise[2 * ki]
+    head = bits[:40]; best = (-1, 0)
+    for c0 in range(0, rows - CH * len(bits)):
+        sc = sum(1 for i in range(40) if (soft(0, c0 + CH * i) > 0) == (head[i] == 1))
+        if sc > best[0]: best = (sc, c0)
+    print("sync: %d of 40 header bits, start chunk %d (1/%d symbol steps)" % (best[0], best[1], CH))
+    c0 = best[1]
+    def report(name, kis):
+        d = [1 if sum(soft(ki, c0 + CH * i) / ks[ki] for ki in kis) > 0 else 0 for i in range(len(bits))]
+        err = sum(1 for x, y in zip(d, bits) if x != y); pay = d[40:]
+        txt = bytes(int("".join(map(str, pay[i:i + 8])), 2) for i in range(0, len(pay) - 7, 8)).decode("latin1")
+        print("%-36s %3d bit errors of %d   text: %r" % (name, err, len(bits), "".join(c if 32 <= ord(c) < 127 else "?" for c in txt)))
+    for ki, k in enumerate(ks): report("k=%2d only (line -%3.0f / -%3.0f kHz)" % (k, k * F0 / 1e3, k * F1 / 1e3), [ki])
+    for kmin in (3, 5, 7, 9): report("only beyond %3.0f kHz (k >= %d)" % (kmin * F0 / 1e3, kmin), [i for i, k in enumerate(ks) if k >= kmin])
+    report("all copies", list(range(len(ks))))
+
 if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "tx": tx(sys.argv[2], sys.argv[3])
     elif len(sys.argv) >= 4 and sys.argv[1] == "rx": rx(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "rxc": rxc(sys.argv[2], sys.argv[3])
     else: print(__doc__)
