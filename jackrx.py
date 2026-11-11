@@ -314,6 +314,10 @@ def cmd_aux(args):
             kb = int(abs(off) / binw); band = db[max(1, kb - int(15e3 / binw)):min(n, kb + int(15e3 / binw))]
             print("   FM %.1f MHz %s: harmonic %d of the %.4f MHz sampler puts it at %.1f kHz -> %+.1f dB over the floor there"
                   % (mhz, name, k, 128 * (44100 if rate in (44100, 88200) else 48000) / 1e6, abs(off) / 1e3, sorted(band)[len(band) // 2] - floor))
+            wav = os.path.join(outdir, "aux-fm-%.1f-%d.wav" % (mhz, rate))
+            r2 = subprocess.run([helper("auxfm"), raw, str(rate), str(off), wav], capture_output=True, text=True)
+            for ln in r2.stdout.splitlines(): print("      " + ln)
+            print("      a pilot lock above about 0.5 means the station really is in the recording; listen to " + wav)
         if not folds: print("   no known FM station folds into the audio band at this rate")
     return 0
 
