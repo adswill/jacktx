@@ -14,10 +14,26 @@ guard A.count >= 5, let fs = Double(A[2]), let off = Double(A[3]) else { die("us
 let deUs = A.firstIndex(of: "--deemph").flatMap { Double(A[$0 + 1]) } ?? 50
 guard let d = FileManager.default.contents(atPath: A[1]) else { die("cannot read \(A[1])") }
 let n = d.count / 4; var x = [Float](repeating: 0, count: n); d.withUnsafeBytes { let p = $0.bindMemory(to: Float.self); for k in 0..<n { x[k] = p[k] } }
+// optional low-pass first (--lp HZ), to remove a strong tone above the band of interest
+if let lpHz = A.firstIndex(of: "--lp").flatMap({ Double(A[$0 + 1]) }) {
+    let tl = 257; var hl = [Float](repeating: 0, count: tl); let ml = Double(tl - 1) / 2; var sm: Float = 0
+    for i in 0..<tl { let t = Double(i) - ml; let sc = t == 0 ? 2 * lpHz / fs : sin(2 * Double.pi * lpHz / fs * t) / (Double.pi * t); hl[i] = Float(sc * (0.54 - 0.46 * cos(2 * Double.pi * Double(i) / Double(tl - 1)))); sm += hl[i] }
+    hl = hl.map { $0 / sm }; var y = [Float](repeating: 0, count: n - tl); vDSP_conv(x, 1, Array(hl.reversed()), 1, &y, 1, vDSP_Length(n - tl), vDSP_Length(tl)); x = y }
+// optional cleaning (--clean): removes mains hum (below 3 kHz) and the Mac's own USB tones near 8 and 16 kHz,
+// which would otherwise dominate the recording and hide a weak folded station
+if A.contains("--clean") {
+    let tl = 1025; let ml = Double(tl - 1) / 2
+    func lp(_ fc: Double) -> [Double] { var h = [Double](repeating: 0, count: tl); var sm = 0.0
+        for i in 0..<tl { let t = Double(i) - ml; let sc = t == 0 ? 2 * fc / fs : sin(2 * Double.pi * fc / fs * t) / (Double.pi * t); h[i] = sc * (0.54 - 0.46 * cos(2 * Double.pi * Double(i) / Double(tl - 1))); sm += h[i] }
+        return h.map { $0 / sm } }
+    let a3 = lp(3000), b1 = lp(7600), b2 = lp(8600), c1 = lp(15700), c2 = lp(16500)
+    var h = [Float](repeating: 0, count: tl); for i in 0..<tl { h[i] = Float((i == Int(ml) ? 1.0 : 0.0) - a3[i] - (b2[i] - b1[i]) - (c2[i] - c1[i])) }
+    var y = [Float](repeating: 0, count: x.count - tl); vDSP_conv(x, 1, Array(h.reversed()), 1, &y, 1, vDSP_Length(x.count - tl), vDSP_Length(tl)); x = y }
+let n2 = x.count
 // analytic signal: Hilbert FIR (odd taps, Hamming), delay (T-1)/2
 let T = 129, mid = (T - 1) / 2; var h = [Float](repeating: 0, count: T)
 for i in 0..<T { let k = i - mid; if k % 2 != 0 { h[i] = Float(2 / (Double.pi * Double(k)) * (0.54 - 0.46 * cos(2 * Double.pi * Double(i) / Double(T - 1)))) } }
-let m = n - T; guard m > 1000 else { die("recording too short") }
+let m = n2 - T; guard m > 1000 else { die("recording too short") }
 var q = [Float](repeating: 0, count: m); vDSP_conv(x, 1, Array(h.reversed()), 1, &q, 1, vDSP_Length(m), vDSP_Length(T))
 // instantaneous frequency (always >= 0 for a real signal) and amplitude
 var f = [Float](repeating: 0, count: m), amp = [Float](repeating: 0, count: m)
