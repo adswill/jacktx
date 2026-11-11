@@ -2948,6 +2948,12 @@ def rx_nfm(z, rate, dev=8000.0):
 
 def rx_main(args):
     i = args.index("-rx"); kind = "tone"
+    # broadcast FM, RDS and band sweeps live in jackrx.py (HackRF): -rx fm 93.9, -rx sweep [--band 87.5-108]
+    if i + 1 < len(args) and args[i + 1].lstrip("-") in ("fm", "wfm", "rds", "sweep"):
+        rest = [args[i + 1].lstrip("-")] + args[i + 2:]
+        if rest[0] != "sweep" and "--freq" in rest:
+            k = rest.index("--freq"); rest = [rest[0], rest[k + 1]] + rest[1:k] + rest[k + 2:]
+        return subprocess.call([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jackrx.py")] + rest)
     if i + 1 < len(args) and args[i + 1].lstrip("-") in RX_MODES: kind = args[i + 1].lstrip("-")
     elif i + 1 < len(args) and not args[i + 1].startswith("-"): sys.exit("-rx MODE: one of %s" % ", ".join(RX_MODES))
     cal = cal_load(cal_path(args)).get("devices", {}).get(device_id(args), {}); tol = _opt(args, "--tol", float, 10.0) * 1e3
@@ -3233,6 +3239,7 @@ def print_help():
     print("       python3 -I jacktx.py --wav FILE [--freq MHZ]                    send a WAV as-is (or -am/-nfm/-wfm/-usb --wav FILE)")
     print("       python3 -I jacktx.py --freq MHZ --plan | --coverage             where can it transmit?")
     print("       python3 -I jacktx.py -rx [tone|rtty|am|nfm] [--freq MHZ] [--sdr rtl|hackrf] [--from-file FILE]")
+    print("       python3 -I jacktx.py -rx fm 93.9 | -rx sweep [--band 87.5-108]   broadcast FM with RDS, band sweep (HackRF)")
     print("       python3 -I jacktx.py -calibrate [--sdr rtl|hackrf]              measure the clock lines with an SDR")
     print("       python3 -I jacktx.py --selftest")
     print("The frequencies below are the defaults (6.144 MHz clock, 96 kHz). --freq moves any mode; it is reachable only near clock lines.\n")

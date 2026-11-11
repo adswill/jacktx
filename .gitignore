@@ -3,3 +3,8 @@ __pycache__/
 *.wav
 *.f32
 .DS_Store
+.hackrf.lock/
+*.cs8
+*.cu8
+*.cf32
+*.sigmf-data
