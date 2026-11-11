@@ -88,8 +88,13 @@ def rxc(cs8, text, sg=None):
     subprocess.run([os.path.join(here, "bin", "zckrx"), cs8, str(SR), str(1 << 17), o] + ["%.3f" % c for c in cand], check=True, capture_output=True)
     a = array.array("f"); a.frombytes(open(o, "rb").read()); nf = len(cand); rows = len(a) // (2 * nf)
     pw = [sum(a[2 * (r * nf + j)] ** 2 + a[2 * (r * nf + j) + 1] ** 2 for r in range(rows)) for j in range(nf)]
+    c1 = cand[pw.index(max(pw))]
+    cand = [c1 + d / 4.0 for d in range(-16, 17)]     # refine to 0.25 Hz: long symbols need it
+    subprocess.run([os.path.join(here, "bin", "zckrx"), cs8, str(SR), str(1 << 21), o] + ["%.3f" % c for c in cand], check=True, capture_output=True)
+    a = array.array("f"); a.frombytes(open(o, "rb").read()); nf = len(cand); rows = len(a) // (2 * nf)
+    pw = [sum(a[2 * (r * nf + j)] ** 2 + a[2 * (r * nf + j) + 1] ** 2 for r in range(rows)) for j in range(nf)]
     fc = CENTER + cand[pw.index(max(pw))]; ppm = (fc - LINE) / LINE
-    print("line at %.6f MHz (%+.1f ppm)" % (fc / 1e6, ppm * 1e6))
+    print("line at %.7f MHz (%+.2f ppm)" % (fc / 1e6, ppm * 1e6))
     ks = [1, 3, 5, 7, 9, 11]; CH = 8; chunk = int(round(SYM * SR / CH))
     fl = []
     for k in ks:
@@ -104,7 +109,7 @@ def rxc(cs8, text, sg=None):
     def soft(ki, c0): return energy(2 * ki + 1, c0) / noise[2 * ki + 1] - energy(2 * ki, c0) / noise[2 * ki]
     head = bits[:40]; best = (-1, 0)
     for c0 in range(0, rows - CH * len(bits)):
-        sc = sum(1 for i in range(40) if (soft(0, c0 + CH * i) > 0) == (head[i] == 1))
+        sc = sum(1 for i in range(40) if (soft(0, c0 + CH * i) + soft(1, c0 + CH * i) / 3 + soft(2, c0 + CH * i) / 5 > 0) == (head[i] == 1))
         if sc > best[0]: best = (sc, c0)
     print("sync: %d of 40 header bits, start chunk %d (1/%d symbol steps)" % (best[0], best[1], CH))
     c0 = best[1]

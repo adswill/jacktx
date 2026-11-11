@@ -66,9 +66,21 @@ With coherent detection (`zck.py rxc`, one matched integration per symbol; same 
 | only beyond 259 kHz (k >= 7) | 8 (4.5 %) |
 | only beyond 333 kHz (k >= 9) | 31 (18 %) |
 
-So at this antenna distance the message is readable (95 % of bits, no error correction) from energy that lies entirely
-beyond 259 kHz on the lower side of the tooth: a decodable signal more than 600 kHz wide counting both sides. A slower
-non-coherent run (7.6 bit/s) was not better than the 15 bit/s one; the cause was not investigated.
+Slower symbols reach further (same antenna position, coherent detection, bit errors of 176):
+
+| copies used | 15.3 bit/s | 7.6 bit/s | 3.8 bit/s |
+|---|---|---|---|
+| only beyond 185 kHz (k >= 5) | 2 | 0 | 0 |
+| only beyond 259 kHz (k >= 7) | 8 | 0 | 0 |
+| only beyond 333 kHz (k >= 9) | 31 | 9 | 3 |
+| k = 9 alone (333 / 396 kHz) | 41 | 14 | 0 |
+| k = 11 alone (407 / 484 kHz) | 48 | 29 | 15 |
+
+So at this antenna distance the message is read without error from energy that lies entirely beyond 259 kHz on the
+lower side of the tooth, and with 98 % of bits right from energy beyond 333 kHz: a decodable signal 600 to 800 kHz wide
+counting both sides. The copy at 407 to 484 kHz reads at 91 % at 3.8 bit/s. In the 3.8 bit/s run the innermost copy
+(k = 1) had 5 errors while k = 9 had none: a narrow interferer near 18.39 MHz is the likely cause (not checked).
+The picture `wideband-proof.png` shows the spectrum with the tone on and off.
 
 ## 4. What this is and what it is not
 
